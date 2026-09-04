@@ -1,0 +1,159 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  addRecord,
+  aggregate,
+  dayKey,
+  recordFromEntry,
+  recordFromLine,
+  windowTotals,
+} from "../src/aggregate.ts";
+import { footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
+import { clearScanCache, scanSessions } from "../src/sessions.ts";
+import { emptyTotals, type UsageRecord } from "../src/types.ts";
+
+function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
+  return {
+    timestamp: new Date(2026, 8, 4, 12, 0).getTime(),
+    model: "gpt-5.5",
+    provider: "openai",
+    input: 1000,
+    output: 200,
+    cacheRead: 5000,
+    cacheWrite: 0,
+    totalTokens: 6200,
+    cost: 0.05,
+    ...overrides,
+  };
+}
+
+function entry(usage: object, extra: object = {}) {
+  return {
+    type: "message",
+    timestamp: "2026-09-04T12:00:00.000Z",
+    message: { role: "assistant", model: "gpt-5.5", provider: "openai", usage, ...extra },
+  };
+}
+
+test("recordFromEntry extracts usage; clamps negatives; skips no-usage", () => {
+  const r = recordFromEntry(
+    entry({ input: 10, output: -5, cacheRead: 3, cacheWrite: 0, totalTokens: 13, cost: { total: 0.01 } }),
+  );
+  assert.ok(r);
+  assert.equal(r!.input, 10);
+  assert.equal(r!.output, 0);
+  assert.equal(r!.cost, 0.01);
+  assert.equal(r!.model, "gpt-5.5");
+  assert.ok(r!.timestamp > 0);
+
+  assert.equal(recordFromEntry({ type: "message", message: { role: "assistant" } }), null);
+  assert.equal(recordFromEntry({ type: "custom" }), null);
+  assert.equal(recordFromEntry(entry({ totalTokens: 0, cost: { total: 0 } })), null);
+});
+
+test("recordFromEntry counts non-assistant usage too (tool-result/compaction)", () => {
+  const r = recordFromEntry(entry({ totalTokens: 500, cost: { total: 0.002 } }, { role: "toolResult" }));
+  assert.ok(r);
+  assert.equal(r!.totalTokens, 500);
+});
+
+test("recordFromLine tolerates junk lines", () => {
+  assert.equal(recordFromLine(""), null);
+  assert.equal(recordFromLine("not json"), null);
+  assert.ok(recordFromLine(JSON.stringify(entry({ totalTokens: 5, cost: { total: 0.1 } }))));
+});
+
+test("aggregate groups by local day and provider/model", () => {
+  const day1 = new Date(2026, 8, 3, 23, 30).getTime();
+  const day2 = new Date(2026, 8, 4, 0, 30).getTime();
+  const agg = aggregate(
+    [
+      record({ timestamp: day1, cost: 1 }),
+      record({ timestamp: day2, cost: 2 }),
+      record({ timestamp: day2, cost: 3, provider: "anthropic", model: "claude-fable-5" }),
+    ],
+    7,
+  );
+  assert.equal(agg.byDay.get("2026-09-03")!.cost, 1);
+  assert.equal(agg.byDay.get("2026-09-04")!.cost, 5);
+  assert.equal(agg.byModel.get("openai/gpt-5.5")!.messages, 2);
+  assert.equal(agg.byModel.get("anthropic/claude-fable-5")!.cost, 3);
+  assert.equal(agg.total.cost, 6);
+  assert.equal(agg.files, 7);
+});
+
+test("windowTotals sums only trailing days", () => {
+  const now = new Date(2026, 8, 4, 12, 0).getTime();
+  const agg = aggregate(
+    [
+      record({ timestamp: now, cost: 1 }),
+      record({ timestamp: now - 3 * 86_400_000, cost: 2 }),
+      record({ timestamp: now - 40 * 86_400_000, cost: 4 }),
+    ],
+    1,
+  );
+  assert.equal(windowTotals(agg.byDay, 1, now).cost, 1);
+  assert.equal(windowTotals(agg.byDay, 7, now).cost, 3);
+  assert.equal(windowTotals(agg.byDay, 30, now).cost, 3);
+});
+
+test("dayKey uses local calendar day", () => {
+  assert.equal(dayKey(new Date(2026, 8, 4, 23, 59).getTime()), "2026-09-04");
+});
+
+test("formatting tiers", () => {
+  assert.equal(formatTokens(950), "950");
+  assert.equal(formatTokens(12_300), "12.3k");
+  assert.equal(formatTokens(2_500_000), "2.5M");
+  assert.equal(formatCost(0), "$0");
+  assert.equal(formatCost(0.004), "<$0.01");
+  assert.equal(formatCost(1.234), "$1.23");
+});
+
+test("footer hides when empty, shows tokens+cost", () => {
+  assert.equal(footerText(emptyTotals()), undefined);
+  const totals = addRecord(emptyTotals(), record());
+  assert.equal(footerText(totals), "📊 6.2k tok · $0.05");
+});
+
+test("session and history blocks render", () => {
+  const totals = addRecord(emptyTotals(), record());
+  const block = sessionBlock(totals, 34.4);
+  assert.ok(block.includes("in 1.0k · out 200"));
+  assert.ok(block.includes("~34% of the window"));
+  assert.ok(sessionBlock(totals, null).includes("cost"));
+
+  const agg = aggregate([record({ cost: 1.5 })], 3);
+  const history = historyBlock(agg, record().timestamp);
+  assert.ok(history.includes("3 local session files"));
+  assert.ok(history.includes("today    $1.50"));
+  assert.ok(history.includes("openai/gpt-5.5"));
+});
+
+test("scanSessions reads jsonl recursively with cache", () => {
+  const base = mkdtempSync(join(tmpdir(), "pify-usage-"));
+  try {
+    mkdirSync(join(base, "sub"), { recursive: true });
+    const lines = [
+      JSON.stringify(entry({ totalTokens: 100, cost: { total: 0.01 } })),
+      "garbage line",
+      JSON.stringify({ type: "custom" }),
+    ].join("\n");
+    writeFileSync(join(base, "a.jsonl"), lines);
+    writeFileSync(join(base, "sub", "b.jsonl"), lines);
+    writeFileSync(join(base, "ignore.txt"), lines);
+
+    clearScanCache();
+    const first = scanSessions(base);
+    assert.equal(first.files, 2);
+    assert.equal(first.records.length, 2);
+    // cached second scan returns the same
+    const second = scanSessions(base);
+    assert.equal(second.records.length, 2);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
