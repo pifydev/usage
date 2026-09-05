@@ -12,7 +12,7 @@ import {
   windowTotals,
 } from "../src/aggregate.ts";
 import { footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
-import { clearScanCache, scanSessions } from "../src/sessions.ts";
+import { clearScanCache, projectLabel, scanSessions } from "../src/sessions.ts";
 import { emptyTotals, type UsageRecord } from "../src/types.ts";
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
@@ -20,6 +20,7 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
     timestamp: new Date(2026, 8, 4, 12, 0).getTime(),
     model: "gpt-5.5",
     provider: "openai",
+    project: "",
     input: 1000,
     output: 200,
     cacheRead: 5000,
@@ -156,4 +157,38 @@ test("scanSessions reads jsonl recursively with cache", () => {
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("v0.2 scanSessions labels records with their project directory", () => {
+  const base = mkdtempSync(join(tmpdir(), "pify-usage-proj-"));
+  try {
+    const line = JSON.stringify(entry({ totalTokens: 100, cost: { total: 0.01 } }));
+    mkdirSync(join(base, "--D--project-alpha--"), { recursive: true });
+    mkdirSync(join(base, "--D--project-beta--"), { recursive: true });
+    writeFileSync(join(base, "--D--project-alpha--", "s1.jsonl"), line);
+    writeFileSync(join(base, "--D--project-beta--", "s2.jsonl"), [line, line].join("\n"));
+    writeFileSync(join(base, "loose.jsonl"), line);
+
+    clearScanCache();
+    const scan = scanSessions(base);
+    assert.equal(scan.files, 3);
+    const projects = scan.records.map((r) => r.project).sort();
+    assert.deepEqual(projects, ["", "D--project-alpha", "D--project-beta", "D--project-beta"]);
+
+    const history = aggregate(scan.records, scan.files);
+    // loose files (project "") stay out of the project breakdown
+    assert.equal(history.byProject.size, 2);
+    assert.equal(history.byProject.get("D--project-beta")!.messages, 2);
+    assert.ok(historyBlock(history, Date.now()).includes("By project (all time)"));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("v0.2 projectLabel strips fences and keeps the recognizable tail", () => {
+  assert.equal(projectLabel("--D--project-pify-plugins--"), "D--project-pify-plugins");
+  assert.equal(projectLabel("----"), "unknown");
+  const long = projectLabel(`--${"a".repeat(60)}--`);
+  assert.equal(long.length, 34);
+  assert.ok(long.startsWith("…"));
 });

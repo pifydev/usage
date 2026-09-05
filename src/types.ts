@@ -23,6 +23,8 @@ export interface UsageRecord {
   timestamp: number;
   model: string;
   provider: string;
+  /** Project the session belongs to; "" when unknown (live events). */
+  project: string;
   input: number;
   output: number;
   cacheRead: number;
@@ -34,6 +36,7 @@ export interface UsageRecord {
 export interface HistoryAggregate {
   byDay: Map<string, UsageTotals>;
   byModel: Map<string, UsageTotals>;
+  byProject: Map<string, UsageTotals>;
   total: UsageTotals;
   files: number;
 }

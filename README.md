@@ -22,9 +22,13 @@ History (214 local session files)
 By model (all time)
   anthropic/claude-fable-5  $12.30 · 4.1M tok
   openai/gpt-5.5            $9.10 · 5.7M tok
+By project (all time)
+  D--project-pify-plugins   $14.80 · 6.2M tok
+  D--project-shop-api       $6.60 · 3.6M tok
 ```
 
 - **History done right** (tmustier's lessons): counts every usage-bearing entry in pi's session JSONL — assistant turns plus the tool-result/compaction usage pi 0.81+ persists; negative/NaN fields clamp to zero; days are your local calendar days; a per-file mtime cache keeps repeat scans instant.
+- **Per-project spend** (v0.2): pi stores sessions one directory per project, so the dashboard can show where the money actually went — the top 5 projects by cost, all time.
 - **`usage_status` tool**: the agent can check session + today totals before committing to expensive work (subagent fan-outs, large reads).
 
 Provider quota APIs (Codex windows, Copilot allowances, OpenRouter credits…) are deliberately out of v0.1 — they cost ~18k lines of per-provider contract maintenance (see `@narumitw/pi-usage` if you need them today).

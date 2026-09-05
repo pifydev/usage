@@ -43,16 +43,24 @@ export function historyBlock(history: HistoryAggregate, now: number): string {
     `  30 days  ${formatCost(month.cost)} · ${formatTokens(month.totalTokens)} tok`,
   ];
 
-  const models = [...history.byModel.entries()]
-    .sort((a, b) => b[1].cost - a[1].cost)
-    .slice(0, 6);
-  if (models.length > 0) {
-    lines.push("By model (all time)");
-    const width = models.reduce((m, [name]) => Math.max(m, Math.min(name.length, 40)), 0);
-    for (const [name, totals] of models) {
-      const label = name.length > 40 ? `${name.slice(0, 39)}…` : name;
-      lines.push(`  ${label.padEnd(width)}  ${formatCost(totals.cost)} · ${formatTokens(totals.totalTokens)} tok`);
-    }
-  }
+  pushBreakdown(lines, "By model (all time)", history.byModel, 6);
+  pushBreakdown(lines, "By project (all time)", history.byProject, 5);
   return lines.join("\n");
+}
+
+/** One "name  $cost · N tok" table, biggest spend first. */
+function pushBreakdown(
+  lines: string[],
+  heading: string,
+  totals: Map<string, UsageTotals>,
+  limit: number,
+): void {
+  const rows = [...totals.entries()].sort((a, b) => b[1].cost - a[1].cost).slice(0, limit);
+  if (rows.length === 0) return;
+  lines.push(heading);
+  const width = rows.reduce((m, [name]) => Math.max(m, Math.min(name.length, 40)), 0);
+  for (const [name, t] of rows) {
+    const label = name.length > 40 ? `${name.slice(0, 39)}…` : name;
+    lines.push(`  ${label.padEnd(width)}  ${formatCost(t.cost)} · ${formatTokens(t.totalTokens)} tok`);
+  }
 }

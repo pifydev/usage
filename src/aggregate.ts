@@ -32,6 +32,7 @@ export function dayKey(timestamp: number): string {
 export function aggregate(records: UsageRecord[], files: number): HistoryAggregate {
   const byDay = new Map<string, UsageTotals>();
   const byModel = new Map<string, UsageTotals>();
+  const byProject = new Map<string, UsageTotals>();
   const total = emptyTotals();
 
   for (const record of records) {
@@ -40,9 +41,13 @@ export function aggregate(records: UsageRecord[], files: number): HistoryAggrega
     addRecord(byDay.get(day) ?? byDay.set(day, emptyTotals()).get(day)!, record);
     const model = `${record.provider}/${record.model}`;
     addRecord(byModel.get(model) ?? byModel.set(model, emptyTotals()).get(model)!, record);
+    if (record.project) {
+      const p = record.project;
+      addRecord(byProject.get(p) ?? byProject.set(p, emptyTotals()).get(p)!, record);
+    }
   }
 
-  return { byDay, byModel, total, files };
+  return { byDay, byModel, byProject, total, files };
 }
 
 /** Sum totals for days within the trailing window (inclusive of today). */
@@ -91,6 +96,7 @@ export function recordFromEntry(entry: unknown): UsageRecord | null {
     timestamp: Number.isFinite(ts) ? ts : 0,
     model: typeof message.model === "string" ? message.model : "unknown",
     provider: typeof message.provider === "string" ? message.provider : "unknown",
+    project: "",
     input: finite(usage.input),
     output: finite(usage.output),
     cacheRead: finite(usage.cacheRead),
