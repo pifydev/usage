@@ -1,7 +1,7 @@
 {
   "name": "@pify/usage",
   "version": "0.3.0",
-  "description": "Token and cost reporting for pi sessions: live footer, /usage dashboard over local session history, zero network",
+  "description": "Token and cost reporting for pi sessions: live footer, local-history dashboard with per-project costs, opt-in provider quota",
   "keywords": [
     "pi-package",
     "pi-extension",
