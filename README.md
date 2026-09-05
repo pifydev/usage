@@ -31,7 +31,19 @@ By project (all time)
 - **Per-project spend** (v0.2): pi stores sessions one directory per project, so the dashboard can show where the money actually went — the top 5 projects by cost, all time.
 - **`usage_status` tool**: the agent can check session + today totals before committing to expensive work (subagent fan-outs, large reads).
 
-Provider quota APIs (Codex windows, Copilot allowances, OpenRouter credits…) are deliberately out of v0.1 — they cost ~18k lines of per-provider contract maintenance (see `@narumitw/pi-usage` if you need them today).
+## `/usage quota` (v0.3)
+
+The one command in this package that touches the network, and only when you run it:
+
+```
+Quota (openrouter · sk-or-v1-395...563)
+  spent    $0.32 (no credit limit on this key)
+  window   day $0.32 · week $0.32 · month $0.32
+```
+
+The key is read from the same `~/.pi/agent/auth.json` pi already uses (or `OPENROUTER_API_KEY`) — no second place to configure credentials — and only the provider's own masked label is ever printed. An 8-second timeout, and any failure renders as `unavailable — HTTP 401` rather than throwing.
+
+Only OpenRouter is implemented. The other providers report opaque rate-limit windows rather than a balance, and chasing all of them costs ~18k lines of per-provider contract maintenance (see `@narumitw/pi-usage` if you need them today).
 
 ## License
 

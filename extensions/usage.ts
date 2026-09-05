@@ -10,9 +10,12 @@
  * tmustier's lesson) with a per-file mtime cache. The usage_status tool
  * lets the agent itself check consumption mid-session.
  *
- * Provider quota APIs (Codex windows, Copilot, OpenRouter…) are deliberately
- * v0.2 — @narumitw/pi-usage shows they cost ~18k lines of per-provider
- * contract maintenance.
+ * Everything above is local: no network, no LLM tokens. The single exception
+ * is /usage quota (v0.3), which asks OpenRouter what this key has spent —
+ * opt-in per call, 8s timeout, and a failure prints as "unavailable" beside
+ * the local numbers. Other providers stay out: @narumitw/pi-usage shows the
+ * full set costs ~18k lines of per-provider contract chasing, and OpenRouter
+ * is the one that reports a real balance rather than an opaque window.
  */
 import {
   getAgentDir,
@@ -21,9 +24,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 
 import { addRecord, aggregate, recordFromEntry, windowTotals } from "../src/aggregate.ts";
 import { footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
+import { fetchOpenRouterQuota, quotaBlock } from "../src/quota.ts";
 import { scanSessions } from "../src/sessions.ts";
 import { emptyTotals, isRecord, type UsageTotals } from "../src/types.ts";
 
@@ -86,10 +91,33 @@ export default function usage(pi: ExtensionAPI) {
 
   // ── Command & tool ───────────────────────────────────────────────────
 
+  /**
+   * The key pi itself uses, read from the same auth.json — no second place to
+   * configure credentials, and no key is ever printed.
+   */
+  function providerKey(provider: string): string {
+    try {
+      const auth = JSON.parse(readFileSync(join(getAgentDir(), "auth.json"), "utf8")) as Record<string, unknown>;
+      const entry = auth[provider];
+      if (isRecord(entry) && typeof entry.key === "string") return entry.key;
+    } catch {
+      // no auth.json, or unreadable — fall through to the environment
+    }
+    return process.env.OPENROUTER_API_KEY ?? "";
+  }
+
   pi.registerCommand("usage", {
-    description: "Token and cost dashboard: current session + local history",
-    handler: async (_args, ctx) => {
-      if (ctx.hasUI) ctx.ui.notify(dashboard(ctx), "info");
+    description: "Token and cost dashboard: /usage [quota]",
+    handler: async (args, ctx) => {
+      if (!ctx.hasUI) return;
+      if ((args ?? "").trim().toLowerCase() === "quota") {
+        // The one networked call in this package, and only when asked for.
+        ctx.ui.notify("Checking provider quota…", "info");
+        const result = await fetchOpenRouterQuota(providerKey("openrouter"));
+        ctx.ui.notify(quotaBlock(result), result.ok ? "info" : "warning");
+        return;
+      }
+      ctx.ui.notify(dashboard(ctx), "info");
     },
   });
 

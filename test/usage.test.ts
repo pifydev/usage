@@ -13,6 +13,7 @@ import {
 } from "../src/aggregate.ts";
 import { footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
 import { clearScanCache, projectLabel, scanSessions } from "../src/sessions.ts";
+import { fetchOpenRouterQuota, parseOpenRouterKey, quotaBlock } from "../src/quota.ts";
 import { emptyTotals, type UsageRecord } from "../src/types.ts";
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
@@ -191,4 +192,89 @@ test("v0.2 projectLabel strips fences and keeps the recognizable tail", () => {
   const long = projectLabel(`--${"a".repeat(60)}--`);
   assert.equal(long.length, 34);
   assert.ok(long.startsWith("…"));
+});
+
+test("v0.3 parseOpenRouterKey shapes the real payload", () => {
+  // captured from https://openrouter.ai/api/v1/key
+  const live = {
+    data: {
+      label: "sk-or-v1-395...563",
+      limit: null,
+      limit_remaining: null,
+      usage: 0.0031,
+      usage_daily: 0.0031,
+      usage_weekly: 0.0031,
+      usage_monthly: 0.0031,
+      is_free_tier: false,
+    },
+  };
+  const quota = parseOpenRouterKey(live)!;
+  assert.equal(quota.provider, "openrouter");
+  assert.equal(quota.used, 0.0031);
+  assert.equal(quota.limit, null);
+  assert.equal(quota.remaining, null);
+  assert.equal(quota.freeTier, false);
+  assert.equal(quota.label, "sk-or-v1-395...563");
+
+  // a capped key derives what is left when the API does not state it
+  const capped = parseOpenRouterKey({ data: { usage: 4, limit: 10 } })!;
+  assert.equal(capped.remaining, 6);
+  // "no limit" must not read as "limit of zero"
+  assert.notEqual(parseOpenRouterKey({ data: { usage: 4, limit: null } })!.limit, 0);
+  assert.equal(parseOpenRouterKey("nonsense"), null);
+  assert.equal(parseOpenRouterKey({ data: null }), null);
+});
+
+test("v0.3 fetchOpenRouterQuota turns every failure into a result", async () => {
+  const noKey = await fetchOpenRouterQuota("");
+  assert.equal(noKey.ok, false);
+
+  const http500 = await fetchOpenRouterQuota("k", async () => ({
+    ok: false,
+    status: 500,
+    json: async () => ({}),
+  }));
+  assert.equal(http500.ok, false);
+  assert.ok(!http500.ok && http500.reason.includes("500"));
+
+  const thrown = await fetchOpenRouterQuota("k", async () => {
+    throw new Error("network down");
+  });
+  assert.equal(thrown.ok, false);
+  assert.ok(!thrown.ok && thrown.reason.includes("network down"));
+
+  let sentAuth = "";
+  const good = await fetchOpenRouterQuota("secret-key", async (_url, init) => {
+    sentAuth = init.headers.Authorization ?? "";
+    return { ok: true, status: 200, json: async () => ({ data: { usage: 1.5, limit: 10 } }) };
+  });
+  assert.equal(good.ok, true);
+  assert.equal(sentAuth, "Bearer secret-key");
+  assert.ok(good.ok && good.quota.remaining === 8.5);
+});
+
+test("v0.3 quotaBlock never prints the key and states what is unknown", () => {
+  const uncapped = quotaBlock({
+    ok: true,
+    quota: {
+      provider: "openrouter", used: 0.0031, limit: null, remaining: null,
+      daily: 0.0031, weekly: 0.0031, monthly: 0.0031, label: "sk-or-v1-395...563", freeTier: false,
+    },
+  });
+  assert.ok(uncapped.includes("no credit limit"));
+  assert.ok(uncapped.includes("<$0.01"));
+  assert.ok(uncapped.includes("sk-or-v1-395...563"));
+
+  const capped = quotaBlock({
+    ok: true,
+    quota: {
+      provider: "openrouter", used: 4, limit: 10, remaining: 6,
+      daily: null, weekly: null, monthly: null, label: null, freeTier: true,
+    },
+  });
+  assert.ok(capped.includes("$4.00 of $10.00 · $6.00 left"));
+  assert.ok(capped.includes("free"));
+
+  const failed = quotaBlock({ ok: false, provider: "openrouter", reason: "HTTP 401" });
+  assert.ok(failed.includes("unavailable — HTTP 401"));
 });
