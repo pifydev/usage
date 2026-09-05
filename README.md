@@ -36,7 +36,7 @@ By project (all time)
 The one command in this package that touches the network, and only when you run it:
 
 ```
-Quota (openrouter · sk-or-v1-395...563)
+Quota (openrouter · sk-or-v1-abc...xyz)
   spent    $0.32 (no credit limit on this key)
   window   day $0.32 · week $0.32 · month $0.32
 ```

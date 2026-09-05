@@ -198,7 +198,7 @@ test("v0.3 parseOpenRouterKey shapes the real payload", () => {
   // captured from https://openrouter.ai/api/v1/key
   const live = {
     data: {
-      label: "sk-or-v1-395...563",
+      label: "sk-or-v1-abc...xyz",
       limit: null,
       limit_remaining: null,
       usage: 0.0031,
@@ -214,7 +214,7 @@ test("v0.3 parseOpenRouterKey shapes the real payload", () => {
   assert.equal(quota.limit, null);
   assert.equal(quota.remaining, null);
   assert.equal(quota.freeTier, false);
-  assert.equal(quota.label, "sk-or-v1-395...563");
+  assert.equal(quota.label, "sk-or-v1-abc...xyz");
 
   // a capped key derives what is left when the API does not state it
   const capped = parseOpenRouterKey({ data: { usage: 4, limit: 10 } })!;
@@ -258,12 +258,12 @@ test("v0.3 quotaBlock never prints the key and states what is unknown", () => {
     ok: true,
     quota: {
       provider: "openrouter", used: 0.0031, limit: null, remaining: null,
-      daily: 0.0031, weekly: 0.0031, monthly: 0.0031, label: "sk-or-v1-395...563", freeTier: false,
+      daily: 0.0031, weekly: 0.0031, monthly: 0.0031, label: "sk-or-v1-abc...xyz", freeTier: false,
     },
   });
   assert.ok(uncapped.includes("no credit limit"));
   assert.ok(uncapped.includes("<$0.01"));
-  assert.ok(uncapped.includes("sk-or-v1-395...563"));
+  assert.ok(uncapped.includes("sk-or-v1-abc...xyz"));
 
   const capped = quotaBlock({
     ok: true,
