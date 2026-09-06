@@ -18,6 +18,7 @@
  * is the one that reports a real balance rather than an opaque window.
  */
 import {
+  formatSkillsForPrompt,
   getAgentDir,
   type ExtensionAPI,
   type ExtensionContext,
@@ -27,6 +28,7 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 
 import { addRecord, aggregate, recordFromEntry, windowTotals } from "../src/aggregate.ts";
+import { buildBreakdown, formatBreakdown } from "../src/context.ts";
 import { footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
 import { fetchOpenRouterQuota, quotaBlock } from "../src/quota.ts";
 import { scanSessions } from "../src/sessions.ts";
@@ -104,6 +106,54 @@ export default function usage(pi: ExtensionAPI) {
       // no auth.json, or unreadable — fall through to the environment
     }
     return process.env.OPENROUTER_API_KEY ?? "";
+  }
+
+  /**
+   * Where the context window went, computed from what pi already holds:
+   * the assembled system prompt, the context files and skills embedded in
+   * it, the enabled tool definitions, and the entries that would be sent.
+   * No network, no model call — same rule as the rest of the package.
+   */
+  function contextBreakdown(ctx: UiContext): string {
+    const host = ctx as unknown as {
+      getSystemPrompt?: () => string;
+      getSystemPromptOptions?: () => {
+        contextFiles?: Array<{ path?: string; content?: string }>;
+        skills?: unknown[];
+        selectedTools?: string[];
+      };
+      getContextUsage?: () => { contextWindow?: number; used?: number; total?: number } | undefined;
+      sessionManager?: { buildContextEntries?: () => unknown[]; getBranch?: () => unknown[] };
+    };
+
+    const systemPrompt = host.getSystemPrompt?.() ?? "";
+    const options = host.getSystemPromptOptions?.() ?? {};
+    const selected = new Set(options.selectedTools ?? []);
+    const allTools = (pi as unknown as { getAllTools?: () => Array<{ name?: string }> }).getAllTools?.() ?? [];
+    const tools = selected.size > 0 ? allTools.filter((t) => selected.has(t.name ?? "")) : allTools;
+
+    let skillsText = "";
+    try {
+      skillsText = formatSkillsForPrompt((options.skills ?? []) as never).trim();
+    } catch {
+      // A pi version that formats skills differently just reports 0 here.
+    }
+
+    const entries = host.sessionManager?.buildContextEntries?.() ?? host.sessionManager?.getBranch?.() ?? [];
+    const usage = host.getContextUsage?.();
+    const contextWindow =
+      usage?.contextWindow ?? (ctx.model as { contextWindow?: number } | null)?.contextWindow ?? 0;
+
+    const breakdown = buildBreakdown({
+      systemPrompt,
+      contextFiles: options.contextFiles ?? [],
+      skillsText,
+      tools,
+      entries,
+      contextWindow,
+    });
+    const reported = typeof usage?.used === "number" ? usage.used : lastPromptTokens || null;
+    return formatBreakdown(breakdown, reported);
   }
 
   pi.registerCommand("usage", {

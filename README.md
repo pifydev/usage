@@ -28,6 +28,20 @@ By project (all time)
 ```
 
 - **History done right** (tmustier's lessons): counts every usage-bearing entry in pi's session JSONL — assistant turns plus the tool-result/compaction usage pi 0.81+ persists; negative/NaN fields clamp to zero; days are your local calendar days; a per-file mtime cache keeps repeat scans instant.
+- **Where the window went** (v0.4): `/usage context` breaks the context window into system prompt, context files, skills, tool definitions, tool results, and conversation — so "why am I at 60%?" has an answer that is usually "one `read` of a 4,000-line file", not a mystery.
+
+```
+Context window: 22.6k of 200.0k used (11%)
+  System prompt     ····························  <1%  11
+  Context files     ····························   1%  3.0k
+  Tool definitions  ····························  <1%  371
+  Tool results      ██··························   8%  16.8k
+  Conversation      ····························   1%  2.4k
+  Free space        █████████████████████████···  89%  177.4k
+```
+
+  Computed from what pi already holds — the assembled system prompt, the files and skills embedded in it, the enabled tool definitions, and the entries that would be sent. No network, no model call. Context files and skills are counted only when their text is genuinely embedded in the prompt, and the system-prompt row is the remainder after subtracting them, so the rows sum to the whole instead of double-counting. When the provider reports more than we can attribute, the difference is shown as **Other** rather than dropped. (The idea is from [`pi-cc-extensions`](https://github.com/minuque/pi-cc-extensions)' `/context`.)
+
 - **Per-project spend** (v0.2): pi stores sessions one directory per project, so the dashboard can show where the money actually went — the top 5 projects by cost, all time.
 - **`usage_status` tool**: the agent can check session + today totals before committing to expensive work (subagent fan-outs, large reads).
 
