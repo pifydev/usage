@@ -13,7 +13,16 @@ import {
 } from "../src/aggregate.ts";
 import { footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
 import { clearScanCache, projectLabel, scanSessions } from "../src/sessions.ts";
-import { fetchOpenRouterQuota, parseOpenRouterKey, quotaBlock } from "../src/quota.ts";
+import {
+  fetchQuota,
+  findProvider,
+  parseDeepSeekBalance,
+  parseOpenRouterKey,
+  quotaBlock,
+  quotaReport,
+} from "../src/quota.ts";
+import { checkUrl, controlledGetJson } from "../src/http.ts";
+import { redact } from "../src/redact.ts";
 import { emptyTotals, type UsageRecord } from "../src/types.ts";
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
@@ -225,32 +234,107 @@ test("v0.3 parseOpenRouterKey shapes the real payload", () => {
   assert.equal(parseOpenRouterKey({ data: null }), null);
 });
 
-test("v0.3 fetchOpenRouterQuota turns every failure into a result", async () => {
-  const noKey = await fetchOpenRouterQuota("");
+test("v0.5 fetchQuota turns every failure into a result, with our own wording", async () => {
+  const openrouter = findProvider("openrouter")!;
+
+  const noKey = await fetchQuota(openrouter, "");
   assert.equal(noKey.ok, false);
+  assert.ok(!noKey.ok && noKey.reason.includes("no API key"));
 
-  const http500 = await fetchOpenRouterQuota("k", async () => ({
-    ok: false,
-    status: 500,
-    json: async () => ({}),
-  }));
+  const http500 = await fetchQuota(openrouter, "k", async () =>
+    new Response("provider said something with a token in it", { status: 500 }),
+  );
   assert.equal(http500.ok, false);
-  assert.ok(!http500.ok && http500.reason.includes("500"));
+  assert.ok(!http500.ok && http500.reason.includes("trouble"));
+  assert.ok(!http500.ok && !http500.reason.includes("token"), "the body is never read into the message");
 
-  const thrown = await fetchOpenRouterQuota("k", async () => {
-    throw new Error("network down");
+  const unauthorized = await fetchQuota(openrouter, "k", async () => new Response("{}", { status: 401 }));
+  assert.ok(!unauthorized.ok && unauthorized.reason.includes("rejected the key"));
+
+  const thrown = await fetchQuota(openrouter, "k", async () => {
+    throw new Error("connect ECONNREFUSED 1.2.3.4:443 with Authorization: Bearer secret");
   });
   assert.equal(thrown.ok, false);
-  assert.ok(!thrown.ok && thrown.reason.includes("network down"));
+  assert.ok(!thrown.ok && !thrown.reason.includes("secret"), "raw errors are dropped, not shown");
 
   let sentAuth = "";
-  const good = await fetchOpenRouterQuota("secret-key", async (_url, init) => {
-    sentAuth = init.headers.Authorization ?? "";
-    return { ok: true, status: 200, json: async () => ({ data: { usage: 1.5, limit: 10 } }) };
+  let sentRedirect: RequestRedirect | undefined;
+  const good = await fetchQuota(openrouter, "secret-key", async (_url, init) => {
+    sentAuth = String((init?.headers as Record<string, string>)?.Authorization ?? "");
+    sentRedirect = init?.redirect;
+    return new Response(JSON.stringify({ data: { usage: 1.5, limit: 10 } }), { status: 200 });
   });
   assert.equal(good.ok, true);
   assert.equal(sentAuth, "Bearer secret-key");
+  assert.equal(sentRedirect, "error", "a credentialed request must never follow a redirect");
   assert.ok(good.ok && good.quota.remaining === 8.5);
+});
+
+test("v0.5 a credentialed request only ever goes to an allowlisted HTTPS host", async () => {
+  assert.equal(checkUrl("https://openrouter.ai/api/v1/key", ["openrouter.ai"]), null);
+  assert.equal(checkUrl("http://openrouter.ai/api/v1/key", ["openrouter.ai"])!.kind, "unsafe-url");
+  assert.equal(checkUrl("https://evil.example/api", ["openrouter.ai"])!.kind, "not-allowed");
+  assert.equal(checkUrl("not a url", ["openrouter.ai"])!.kind, "unsafe-url");
+
+  // and the guard runs before anything is dialled
+  let called = false;
+  const result = await controlledGetJson({
+    url: "https://evil.example/steal",
+    timeoutMs: 100,
+    allowlist: ["openrouter.ai"],
+    fetchImpl: async () => {
+      called = true;
+      return new Response("{}", { status: 200 });
+    },
+  });
+  assert.equal(called, false, "the request is never made");
+  assert.ok(!result.ok && result.kind === "not-allowed");
+});
+
+test("v0.5 DeepSeek balance parses the documented shape", () => {
+  const payload = {
+    is_available: true,
+    balance_infos: [
+      { currency: "CNY", total_balance: "110.00", granted_balance: "10.00", topped_up_balance: "100.00" },
+    ],
+  };
+  const quota = parseDeepSeekBalance(payload)!;
+  assert.equal(quota.provider, "deepseek");
+  assert.equal(quota.remaining, 110);
+  assert.equal(quota.currency, "CNY");
+  assert.ok(quota.label!.includes("granted 10"));
+  assert.ok(quota.label!.includes("topped up 100"));
+
+  // a key with no balances is a successful answer, not an error
+  assert.equal(parseDeepSeekBalance({ is_available: false, balance_infos: [] })!.remaining, 0);
+  assert.equal(parseDeepSeekBalance({ balance_infos: "nope" }), null);
+  assert.equal(parseDeepSeekBalance(null), null);
+
+  assert.ok(quotaBlock({ ok: true, quota }).includes("CNY 110.00"));
+});
+
+test("v0.5 the report lists only configured providers, and says so when there are none", () => {
+  const empty = quotaReport([]);
+  assert.ok(empty.includes("No provider"));
+  assert.ok(empty.includes("OpenRouter") && empty.includes("DeepSeek"));
+  assert.ok(empty.includes("documented"), "the stance on private APIs is stated, not implied");
+
+  const both = quotaReport([
+    { ok: false, provider: "deepseek", reason: "rate limited by the provider" },
+    { ok: true, quota: { ...parseOpenRouterKey({ data: { usage: 2, limit: 10 } })! } },
+  ]);
+  assert.ok(both.includes("DeepSeek"));
+  assert.ok(both.includes("OpenRouter"));
+});
+
+test("v0.5 redact scrubs what should never have been there", () => {
+  assert.ok(!redact("failed with sk-or-v1-abcdefghijklmnopqrstuvwxyz012345").includes("abcdefgh"));
+  assert.ok(!redact("Authorization: Bearer hunter2hunter2hunter2").includes("hunter2"));
+  assert.ok(!redact("api_key=abcdefghijklmnop").includes("abcdefghijklmnop"));
+  assert.ok(!redact("https://openrouter.ai/api?key=secretvalue").includes("secretvalue"));
+  // ordinary text is untouched
+  assert.equal(redact("spent $1.50 of $10.00"), "spent $1.50 of $10.00");
+  assert.equal(redact(""), "");
 });
 
 test("v0.3 quotaBlock never prints the key and states what is unknown", () => {
@@ -258,7 +342,7 @@ test("v0.3 quotaBlock never prints the key and states what is unknown", () => {
     ok: true,
     quota: {
       provider: "openrouter", used: 0.0031, limit: null, remaining: null,
-      daily: 0.0031, weekly: 0.0031, monthly: 0.0031, label: "sk-or-v1-abc...xyz", freeTier: false,
+      daily: 0.0031, weekly: 0.0031, monthly: 0.0031, label: "sk-or-v1-abc...xyz", freeTier: false, currency: "USD",
     },
   });
   assert.ok(uncapped.includes("no credit limit"));
@@ -269,7 +353,7 @@ test("v0.3 quotaBlock never prints the key and states what is unknown", () => {
     ok: true,
     quota: {
       provider: "openrouter", used: 4, limit: 10, remaining: 6,
-      daily: null, weekly: null, monthly: null, label: null, freeTier: true,
+      daily: null, weekly: null, monthly: null, label: null, freeTier: true, currency: "USD",
     },
   });
   assert.ok(capped.includes("$4.00 of $10.00 · $6.00 left"));

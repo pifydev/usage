@@ -30,7 +30,8 @@ import { readFileSync } from "node:fs";
 import { addRecord, aggregate, recordFromEntry, windowTotals } from "../src/aggregate.ts";
 import { buildBreakdown, formatBreakdown } from "../src/context.ts";
 import { footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
-import { fetchOpenRouterQuota, quotaBlock } from "../src/quota.ts";
+import { QUOTA_PROVIDERS, fetchQuota, quotaReport, type QuotaResult } from "../src/quota.ts";
+import { redact } from "../src/redact.ts";
 import { scanSessions } from "../src/sessions.ts";
 import { emptyTotals, isRecord, type UsageTotals } from "../src/types.ts";
 
@@ -97,15 +98,26 @@ export default function usage(pi: ExtensionAPI) {
    * The key pi itself uses, read from the same auth.json — no second place to
    * configure credentials, and no key is ever printed.
    */
-  function providerKey(provider: string): string {
+  /**
+   * Ask pi for the key rather than reading auth.json. pi owns credential
+   * storage — env precedence, OAuth, whatever it grows next — and parsing
+   * that file here meant handling secrets this package has no business
+   * touching, with a copy of pi's rules that would quietly go stale.
+   */
+  async function providerKey(ctx: UiContext, provider: string): Promise<string> {
+    const registry = ctx.modelRegistry as unknown as {
+      getApiKeyForProvider?: (id: string) => Promise<string | undefined>;
+      getProviderAuth?: (id: string) => Promise<{ auth?: { apiKey?: string } } | undefined>;
+    };
     try {
-      const auth = JSON.parse(readFileSync(join(getAgentDir(), "auth.json"), "utf8")) as Record<string, unknown>;
-      const entry = auth[provider];
-      if (isRecord(entry) && typeof entry.key === "string") return entry.key;
+      const direct = await registry.getApiKeyForProvider?.(provider);
+      if (direct) return direct;
+      const auth = await registry.getProviderAuth?.(provider);
+      if (auth?.auth?.apiKey) return auth.auth.apiKey;
     } catch {
-      // no auth.json, or unreadable — fall through to the environment
+      // an unconfigured provider is not an error here
     }
-    return process.env.OPENROUTER_API_KEY ?? "";
+    return "";
   }
 
   /**
@@ -161,10 +173,24 @@ export default function usage(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
       if ((args ?? "").trim().toLowerCase() === "quota") {
-        // The one networked call in this package, and only when asked for.
-        ctx.ui.notify("Checking provider quota…", "info");
-        const result = await fetchOpenRouterQuota(providerKey("openrouter"));
-        ctx.ui.notify(quotaBlock(result), result.ok ? "info" : "warning");
+        // The one networked path in this package, and only when asked for.
+        // Providers with no key are skipped entirely rather than reported as
+        // broken: an unconfigured provider is not a failure.
+        const configured: Array<{ provider: (typeof QUOTA_PROVIDERS)[number]; key: string }> = [];
+        for (const provider of QUOTA_PROVIDERS) {
+          const key = await providerKey(ctx, provider.id);
+          if (key) configured.push({ provider, key });
+        }
+        if (configured.length === 0) {
+          ctx.ui.notify(quotaReport([]), "info");
+          return;
+        }
+        ctx.ui.notify(`Checking quota for ${configured.map((c) => c.provider.displayName).join(", ")}…`, "info");
+        const results: QuotaResult[] = [];
+        for (const { provider, key } of configured) {
+          results.push(await fetchQuota(provider, key));
+        }
+        ctx.ui.notify(redact(quotaReport(results)), results.every((r) => r.ok) ? "info" : "warning");
         return;
       }
       ctx.ui.notify(dashboard(ctx), "info");

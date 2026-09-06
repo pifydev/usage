@@ -45,19 +45,33 @@ Context window: 22.6k of 200.0k used (11%)
 - **Per-project spend** (v0.2): pi stores sessions one directory per project, so the dashboard can show where the money actually went — the top 5 projects by cost, all time.
 - **`usage_status` tool**: the agent can check session + today totals before committing to expensive work (subagent fan-outs, large reads).
 
-## `/usage quota` (v0.3)
+## `/usage quota` (v0.5)
 
 The one command in this package that touches the network, and only when you run it:
 
 ```
-Quota (openrouter · sk-or-v1-abc...xyz)
-  spent    $0.32 (no credit limit on this key)
-  window   day $0.32 · week $0.32 · month $0.32
+Quota (OpenRouter · sk-or-v1-abc...xyz)
+  spent    $0.33 (no credit limit on this key)
+  window   day $0.01 · week $0.33 · month $0.33
+
+Quota (DeepSeek · granted 10 · topped up 100)
+  balance  CNY 110.00
 ```
 
-The key is read from the same `~/.pi/agent/auth.json` pi already uses (or `OPENROUTER_API_KEY`) — no second place to configure credentials — and only the provider's own masked label is ever printed. An 8-second timeout, and any failure renders as `unavailable — HTTP 401` rather than throwing.
+**Documented endpoints only.** OpenRouter's `/api/v1/key` and DeepSeek's `/user/balance` are published APIs that report a real balance. The subscription-quota endpoints some plugins use for OpenAI, Anthropic and Gemini are undocumented private APIs reverse-engineered from vendor CLIs — they break without notice and were never offered to third parties, so this package does not call them. Providers you have not configured are simply not shown; they are not failures.
 
-Only OpenRouter is implemented. The other providers report opaque rate-limit windows rather than a balance, and chasing all of them costs ~18k lines of per-provider contract maintenance (see `@narumitw/pi-usage` if you need them today).
+**A credentialed request is pinned down** (v0.5), because it carries your provider key:
+
+- HTTPS only, and the host must be on that provider's allowlist.
+- Redirects are refused outright. Following one lets whatever answered choose where the next request goes, with the header already attached.
+- A non-2xx body is **never read**. Error bodies echo request details back, and an echoed `Authorization` header pasted into a notification is exactly the leak this must not cause — the status alone becomes the message.
+- Raw exception text is dropped rather than shown, and everything printed passes a redactor as a last line of defence.
+
+**The key comes from pi** (v0.5): resolved through `modelRegistry`, not by reading `auth.json`. pi owns credential storage — env precedence, OAuth, whatever it grows next — and parsing that file here meant handling secrets this package has no business touching, with a stale copy of pi's rules. Only the provider's own masked label is ever printed.
+
+An 8-second timeout per provider, and any failure renders as `unavailable — the provider rejected the key` rather than throwing.
+
+The hardening, the multi-provider shape, and the documented-APIs-only stance are from [`@imdlan/pi-usage`](https://github.com/imdlan/pi-usage), which supports Z.ai as well.
 
 ## License
 
