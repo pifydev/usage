@@ -1,6 +1,6 @@
 ---
 name: usage
-description: Use when cost or token consumption matters to a decision - before expensive operations (large reads, many subagents, long loops) or when the user asks about spend - explains usage_status and /usage
+description: Use when cost or token consumption matters to a decision - before expensive operations (large reads, many subagents, long loops) or when the user asks about spend
 ---
 
 # Usage awareness
