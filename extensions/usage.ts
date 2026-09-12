@@ -200,6 +200,7 @@ export default function usage(pi: ExtensionAPI) {
   pi.registerTool({
     name: "usage_status",
     label: "Usage status",
+    promptSnippet: "Tokens, cost, and context used so far this session",
     description:
       "Current session token/cost totals plus today's local aggregate. Use when deciding whether " +
       "an expensive approach (large reads, many subagents) is proportionate.",
