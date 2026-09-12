@@ -221,7 +221,7 @@ export function quotaReport(results: QuotaResult[]): string {
     return [
       "No provider with a quota endpoint is configured.",
       `Supported: ${QUOTA_PROVIDERS.map((p) => p.displayName).join(", ")}.`,
-      "Only documented endpoints are used — OpenAI, Anthropic and Gemini publish none for subscription quota.",
+      "Only documented balance endpoints are polled. OpenAI, Anthropic and Gemini publish no balance API, but their rate-limit headers are read passively from ordinary responses — shown above when the session has made a call.",
     ].join("\n");
   }
   return results.map(quotaBlock).join("\n\n");

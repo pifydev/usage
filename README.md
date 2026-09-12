@@ -73,6 +73,8 @@ Quota (DeepSeek · granted 10 · topped up 100)
 
 **Documented endpoints only.** OpenRouter's `/api/v1/key` and DeepSeek's `/user/balance` are published APIs that report a real balance. The subscription-quota endpoints available for some other providers are undocumented private APIs reverse-engineered from vendor CLIs — they break without notice and were never offered to third parties, so this package does not call them. A provider you have not configured is simply not shown; that is not a failure.
 
+**Rate limits, for free.** OpenAI, Anthropic and Gemini publish no balance API, but every completion response carries rate-limit headers, and pi hands them to extensions through `after_provider_response` — before the stream is read, at no cost when unsubscribed. So `/usage quota` also shows what the current provider reported on its last call — requests and tokens left in the window, and for an Anthropic OAuth subscription the unified-window percentage — captured passively from calls the session already made, with no extra request and no credential to handle.
+
 **A credentialed request is pinned down**, because it carries your provider key:
 
 - HTTPS only, and the host must be on that provider's allowlist.

@@ -33,6 +33,7 @@ import { footerText, formatCost, formatTokens, historyBlock, sessionBlock } from
 import { QUOTA_PROVIDERS, fetchQuota, quotaReport, type QuotaResult } from "../src/quota.ts";
 import { redact } from "../src/redact.ts";
 import { scanSessions } from "../src/sessions.ts";
+import { parseRateLimit, formatRateLimit, type RateLimitSnapshot } from "../src/ratelimit.ts";
 import { emptyTotals, isRecord, type UsageTotals } from "../src/types.ts";
 
 type UiContext = ExtensionContext;
@@ -41,6 +42,23 @@ export default function usage(pi: ExtensionAPI) {
   let session: UsageTotals = emptyTotals();
   /** input+cacheRead of the most recent assistant message ≈ context size. */
   let lastPromptTokens = 0;
+  /**
+   * The latest rate-limit headers seen per provider — passive quota, captured
+   * free from responses the session already made, no extra network call.
+   */
+  const rateLimits = new Map<string, RateLimitSnapshot>();
+
+  // after_provider_response carries the status and full headers of every
+  // provider call, before the stream is read; gated on hasHandlers, so
+  // subscribing costs nothing per request. The event does not name the
+  // provider, so it is read from the model in context.
+  pi.on("after_provider_response", async (event, ctx) => {
+    const provider = (ctx as { model?: { provider?: string } }).model?.provider;
+    if (!provider) return;
+    const evt = event as unknown as { headers?: Record<string, string> };
+    const snap = parseRateLimit(provider, evt.headers ?? {}, Date.now());
+    if (snap) rateLimits.set(provider, snap);
+  });
 
   function updateFooter(ctx: UiContext): void {
     if (!ctx.hasUI) return;
@@ -182,7 +200,13 @@ export default function usage(pi: ExtensionAPI) {
           if (key) configured.push({ provider, key });
         }
         if (configured.length === 0) {
-          ctx.ui.notify(quotaReport([]), "info");
+          const passive = [...rateLimits.values()]
+            .map((s) => formatRateLimit(s))
+            .filter((line): line is string => line !== null);
+          ctx.ui.notify(
+            passive.length > 0 ? redact(`${passive.join("\n")}\n\n${quotaReport([])}`) : quotaReport([]),
+            "info",
+          );
           return;
         }
         ctx.ui.notify(`Checking quota for ${configured.map((c) => c.provider.displayName).join(", ")}…`, "info");
@@ -190,7 +214,11 @@ export default function usage(pi: ExtensionAPI) {
         for (const { provider, key } of configured) {
           results.push(await fetchQuota(provider, key));
         }
-        ctx.ui.notify(redact(quotaReport(results)), results.every((r) => r.ok) ? "info" : "warning");
+        const passive = [...rateLimits.values()]
+          .map((s) => formatRateLimit(s))
+          .filter((line): line is string => line !== null);
+        const passiveBlock = passive.length > 0 ? `${passive.join("\n")}\n\n` : "";
+        ctx.ui.notify(redact(passiveBlock + quotaReport(results)), results.every((r) => r.ok) ? "info" : "warning");
         return;
       }
       ctx.ui.notify(dashboard(ctx), "info");
