@@ -1,5 +1,7 @@
 # @pify/usage
 
+[![npm version](https://img.shields.io/npm/v/@pify/usage)](https://www.npmjs.com/package/@pify/usage) [![npm downloads](https://img.shields.io/npm/dm/@pify/usage)](https://www.npmjs.com/package/@pify/usage)
+
 Token and cost reporting for [pi](https://github.com/earendil-works/pi) sessions — a live footer, a `/usage` dashboard, and an agent-callable status tool. Local by default: no network calls, and no LLM tokens spent asking about tokens.
 
 Part of the [Pify suite](https://github.com/pifydev). Install with [`pify install usage`](https://github.com/pifydev/cli) or `pi install npm:@pify/usage`.
