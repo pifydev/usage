@@ -11,7 +11,7 @@ import {
   recordFromLine,
   windowTotals,
 } from "../src/aggregate.ts";
-import { footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
+import { contextGauge, footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
 import { clearScanCache, projectLabel, scanSessions } from "../src/sessions.ts";
 import {
   fetchQuota,
@@ -128,6 +128,22 @@ test("footer hides when empty, shows tokens+cost", () => {
   assert.equal(footerText(emptyTotals()), undefined);
   const totals = addRecord(emptyTotals(), record());
   assert.equal(footerText(totals), "📊 6.2k tok · $0.05");
+});
+
+test("context gauge is a live bar, empty when there is nothing to measure", () => {
+  // No window (piped/-p, or before the first response) → nothing to show.
+  assert.equal(contextGauge(null), "");
+  assert.equal(contextGauge(Number.NaN), "");
+  // A filled/empty six-cell bar plus the percentage.
+  assert.equal(contextGauge(0), "ctx ▱▱▱▱▱▱ 0%");
+  assert.equal(contextGauge(50), "ctx ▰▰▰▱▱▱ 50%");
+  assert.equal(contextGauge(100), "⚠ ctx ▰▰▰▰▰▰ 100%");
+  // Warns once the window is nearly full — the point it becomes a decision.
+  assert.ok(contextGauge(92).startsWith("⚠ "));
+  assert.ok(!contextGauge(80).startsWith("⚠ "));
+  // Out-of-range input is clamped, never overflows the bar.
+  assert.equal(contextGauge(150), "⚠ ctx ▰▰▰▰▰▰ 100%");
+  assert.equal(contextGauge(-10), "ctx ▱▱▱▱▱▱ 0%");
 });
 
 test("session and history blocks render", () => {

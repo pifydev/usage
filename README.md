@@ -11,10 +11,12 @@ Spend is invisible until the invoice arrives, and by then you cannot tell which 
 ## Live footer
 
 ```
-📊 12.3k tok · $0.45
+📊 12.3k tok · $0.45 · ctx ▰▰▰▱▱▱ 34%
 ```
 
 Folded from each message's `usage.cost`, which pi already computes. It survives `/reload` by replaying the session branch rather than keeping a running total in memory.
+
+The gauge on the right is how full the context window is — the third mid-session question, next to tokens and cost. It was computed for the `/usage` dashboard but shown only there; now it is live. It appears once there is a window to measure against (so not under `-p`) and turns to `⚠` past 90%, the point where "how full" stops being trivia and becomes a decision. For the breakdown of what filled it, run `/context`.
 
 ## `/usage`
 
@@ -40,7 +42,7 @@ History counts every usage-bearing entry in pi's session JSONL — assistant tur
 
 Per-project totals come for free: pi stores sessions one directory per project, so the dashboard can show where the money actually went.
 
-## `/usage context`
+## `/context` (or `/usage context`)
 
 ```
 Context window: 22.6k of 200.0k used (11%)

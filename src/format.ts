@@ -19,6 +19,25 @@ export function footerText(session: UsageTotals): string | undefined {
   return `📊 ${formatTokens(session.totalTokens)} tok · ${formatCost(session.cost)}`;
 }
 
+const GAUGE_CELLS = 6;
+
+/**
+ * A compact live context gauge for the footer: a filled/empty bar and the
+ * percentage of the window in use. The footer already carries tokens and cost;
+ * this answers the third question you have mid-session — how close am I to the
+ * wall — which was computed for the /usage dashboard but never shown live. It
+ * warns once the window is nearly full, because that is when the number stops
+ * being trivia and starts being a decision. Empty when there is no window to
+ * measure against (e.g. under `-p`, or before the first response).
+ */
+export function contextGauge(pct: number | null): string {
+  if (pct === null || !Number.isFinite(pct)) return "";
+  const clamped = Math.max(0, Math.min(100, pct));
+  const filled = Math.round((clamped / 100) * GAUGE_CELLS);
+  const bar = "▰".repeat(filled) + "▱".repeat(GAUGE_CELLS - filled);
+  return `${clamped >= 90 ? "⚠ " : ""}ctx ${bar} ${Math.round(clamped)}%`;
+}
+
 export function sessionBlock(session: UsageTotals, contextPct: number | null): string {
   const lines = [
     "Session",

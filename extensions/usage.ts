@@ -29,7 +29,7 @@ import { readFileSync } from "node:fs";
 
 import { addRecord, aggregate, recordFromEntry, windowTotals } from "../src/aggregate.ts";
 import { buildBreakdown, formatBreakdown } from "../src/context.ts";
-import { footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
+import { contextGauge, footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
 import { QUOTA_PROVIDERS, fetchQuota, quotaReport, type QuotaResult } from "../src/quota.ts";
 import { redact } from "../src/redact.ts";
 import { scanSessions } from "../src/sessions.ts";
@@ -62,7 +62,13 @@ export default function usage(pi: ExtensionAPI) {
 
   function updateFooter(ctx: UiContext): void {
     if (!ctx.hasUI) return;
-    ctx.ui.setStatus("usage", footerText(session));
+    const base = footerText(session);
+    if (!base) {
+      ctx.ui.setStatus("usage", undefined);
+      return;
+    }
+    const gauge = contextGauge(contextPct(ctx));
+    ctx.ui.setStatus("usage", gauge ? `${base} · ${gauge}` : base);
   }
 
   function contextPct(ctx: UiContext): number | null {
@@ -187,9 +193,15 @@ export default function usage(pi: ExtensionAPI) {
   }
 
   pi.registerCommand("usage", {
-    description: "Token and cost dashboard: /usage [quota]",
+    description: "Token and cost dashboard: /usage [context | quota]",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
+      if ((args ?? "").trim().toLowerCase() === "context") {
+        // Documented since the breakdown landed, but never wired — the handler
+        // only knew "quota", so `/usage context` quietly showed the dashboard.
+        ctx.ui.notify(contextBreakdown(ctx), "info");
+        return;
+      }
       if ((args ?? "").trim().toLowerCase() === "quota") {
         // The one networked path in this package, and only when asked for.
         // Providers with no key are skipped entirely rather than reported as
@@ -222,6 +234,16 @@ export default function usage(pi: ExtensionAPI) {
         return;
       }
       ctx.ui.notify(dashboard(ctx), "info");
+    },
+  });
+
+  pi.registerCommand("context", {
+    description: "Where the context window went: /context",
+    handler: async (_args, ctx) => {
+      // The live footer gauge says how full the window is; this says spent on
+      // WHAT — the breakdown was built for the /usage dashboard's one-line note
+      // but the full bar view had no command to reach it until now.
+      if (ctx.hasUI) ctx.ui.notify(contextBreakdown(ctx), "info");
     },
   });
 
