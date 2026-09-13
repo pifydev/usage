@@ -1,6 +1,6 @@
 # @pify/usage
 
-[![npm version](https://img.shields.io/npm/v/@pify/usage)](https://www.npmjs.com/package/@pify/usage) [![npm downloads](https://img.shields.io/npm/dm/@pify/usage)](https://www.npmjs.com/package/@pify/usage)
+[![CI](https://github.com/pifydev/usage/actions/workflows/ci.yml/badge.svg)](https://github.com/pifydev/usage/actions/workflows/ci.yml) [![npm version](https://img.shields.io/npm/v/@pify/usage)](https://www.npmjs.com/package/@pify/usage) [![npm downloads](https://img.shields.io/npm/dm/@pify/usage)](https://www.npmjs.com/package/@pify/usage)
 
 Token and cost reporting for [pi](https://github.com/earendil-works/pi) sessions — a live footer, a `/usage` dashboard, and an agent-callable status tool. Local by default: no network calls, and no LLM tokens spent asking about tokens.
 
