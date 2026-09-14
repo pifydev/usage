@@ -20,6 +20,7 @@
 import {
   formatSkillsForPrompt,
   getAgentDir,
+  SettingsManager,
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -150,6 +151,20 @@ export default function usage(pi: ExtensionAPI) {
    * it, the enabled tool definitions, and the entries that would be sent.
    * No network, no model call — same rule as the rest of the package.
    */
+  /**
+   * Tokens pi holds back for auto-compaction, so "Free space" reflects real
+   * headroom. Best-effort: 0 when compaction is off or the API is unavailable.
+   */
+  function compactionReserve(ctx: UiContext): number {
+    try {
+      const projectTrusted = (ctx as { isProjectTrusted?: () => boolean }).isProjectTrusted?.() ?? false;
+      const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted });
+      return settings.getCompactionEnabled() ? Math.max(0, settings.getCompactionReserveTokens()) : 0;
+    } catch {
+      return 0;
+    }
+  }
+
   function contextBreakdown(ctx: UiContext): string {
     const host = ctx as unknown as {
       getSystemPrompt?: () => string;
@@ -187,6 +202,7 @@ export default function usage(pi: ExtensionAPI) {
       tools,
       entries,
       contextWindow,
+      reserveTokens: compactionReserve(ctx),
     });
     const reported = typeof usage?.used === "number" ? usage.used : lastPromptTokens || null;
     return formatBreakdown(breakdown, reported);

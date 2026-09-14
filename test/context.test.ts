@@ -23,6 +23,32 @@ function input(overrides: Partial<Parameters<typeof buildBreakdown>[0]> = {}) {
   });
 }
 
+test("thinking blocks get their own row, not folded into conversation", () => {
+  const entries = [
+    {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "x".repeat(4000) }, // ~1000 tok
+          { type: "text", text: "y".repeat(400) }, // ~100 tok
+        ],
+      },
+    },
+  ];
+  const byLabel = new Map(input({ entries }).parts.map((p) => [p.label, p.tokens]));
+  assert.equal(byLabel.get("Thinking"), 1000);
+  assert.equal(byLabel.get("Conversation"), 100, "thinking is not double-counted into conversation");
+});
+
+test("the compaction reserve is its own row and is carved out of free space", () => {
+  const withReserve = formatBreakdown(input({ reserveTokens: 20_000 }), 50_000);
+  assert.match(withReserve, /Compaction reserve/);
+  // Free space = window - used - reserve. used=50k, reserve=20k, window=200k → 130k free.
+  assert.match(withReserve, /Free space[^\n]*130\.0k/);
+  // Without a reserve there is no such row.
+  assert.ok(!formatBreakdown(input({ reserveTokens: 0 }), 50_000).includes("Compaction reserve"));
+});
+
 test("estimateTextTokens follows pi's four-chars-per-token estimate", () => {
   assert.equal(estimateTextTokens("a".repeat(400)), 100);
   assert.equal(estimateTextTokens(""), 0);

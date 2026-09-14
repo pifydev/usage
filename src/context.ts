@@ -26,6 +26,8 @@ export interface ContextBreakdown {
   /** Sum of every attributed part. */
   attributed: number;
   contextWindow: number;
+  /** Tokens pi holds back for auto-compaction; free space excludes them. */
+  reserveTokens: number;
 }
 
 /** pi's own compaction estimate: four characters per token. */
@@ -52,6 +54,8 @@ export interface BreakdownInput {
   /** Entries pi would send as conversation this turn. */
   entries: unknown[];
   contextWindow: number;
+  /** Tokens pi reserves for auto-compaction (0 when compaction is off). */
+  reserveTokens?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -63,9 +67,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * Tool results are the part that grows without anyone deciding it should,
  * which is exactly why they deserve their own row.
  */
-function foldEntries(entries: unknown[]): { conversation: number; toolResults: number } {
+function foldEntries(entries: unknown[]): { conversation: number; toolResults: number; thinking: number } {
   let conversation = 0;
   let toolResults = 0;
+  let thinking = 0;
 
   for (const entry of entries) {
     if (!isRecord(entry)) continue;
@@ -84,7 +89,10 @@ function foldEntries(entries: unknown[]): { conversation: number; toolResults: n
         } else if (block.type === "text") {
           conversation += estimateTextTokens(block.text);
         } else if (block.type === "thinking") {
-          conversation += estimateTextTokens(block.thinking);
+          // Reasoning tokens are their own line — on keep-thinking models they
+          // are a large, invisible share otherwise buried in "Conversation".
+          // The opaque signature bytes are deliberately never counted or kept.
+          thinking += estimateTextTokens(block.thinking);
         }
       }
       continue;
@@ -100,7 +108,7 @@ function foldEntries(entries: unknown[]): { conversation: number; toolResults: n
     if (role) conversation += estimateTextTokens(message.content ?? message);
   }
 
-  return { conversation, toolResults };
+  return { conversation, toolResults, thinking };
 }
 
 export function buildBreakdown(input: BreakdownInput): ContextBreakdown {
@@ -119,7 +127,7 @@ export function buildBreakdown(input: BreakdownInput): ContextBreakdown {
       }),
     0,
   );
-  const { conversation, toolResults } = foldEntries(input.entries);
+  const { conversation, toolResults, thinking } = foldEntries(input.entries);
   // Memory and skills live inside the prompt; subtract so rows do not overlap.
   const system = Math.max(0, estimateTextTokens(input.systemPrompt) - memory - skills);
 
@@ -129,6 +137,7 @@ export function buildBreakdown(input: BreakdownInput): ContextBreakdown {
     { label: "Skills", tokens: skills },
     { label: "Tool definitions", tokens: tools },
     { label: "Tool results", tokens: toolResults },
+    { label: "Thinking", tokens: thinking },
     { label: "Conversation", tokens: conversation },
   ];
 
@@ -136,6 +145,7 @@ export function buildBreakdown(input: BreakdownInput): ContextBreakdown {
     parts,
     attributed: parts.reduce((sum, part) => sum + part.tokens, 0),
     contextWindow: Math.max(0, input.contextWindow),
+    reserveTokens: Math.max(0, input.reserveTokens ?? 0),
   };
 }
 
@@ -168,10 +178,15 @@ export function formatBreakdown(breakdown: ContextBreakdown, reportedUsed: numbe
   const window = breakdown.contextWindow;
   const used = Math.max(reportedUsed ?? 0, breakdown.attributed);
   const other = Math.max(0, used - breakdown.attributed);
-  const free = window > 0 ? Math.max(0, window - used) : 0;
+  // pi holds back a reserve for auto-compaction; real headroom excludes it, so
+  // show it as its own row and subtract it from free space rather than letting
+  // "Free space" overstate what you can actually use before compaction fires.
+  const reserve = window > 0 ? Math.min(breakdown.reserveTokens, Math.max(0, window - used)) : 0;
+  const free = window > 0 ? Math.max(0, window - used - reserve) : 0;
 
   const rows = [...breakdown.parts];
   if (other > 0) rows.push({ label: "Other", tokens: other });
+  if (reserve > 0) rows.push({ label: "Compaction reserve", tokens: reserve });
   if (window > 0) rows.push({ label: "Free space", tokens: free });
 
   const width = rows.reduce((m, row) => Math.max(m, row.label.length), 0);

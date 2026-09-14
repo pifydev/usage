@@ -62,6 +62,8 @@ Computed entirely from what pi already holds: the assembled system prompt, the f
 
 Context files and skills are counted only when their text is genuinely embedded in the prompt, and the system-prompt row is the remainder after subtracting them, so the rows sum to the whole instead of double-counting. When the provider reports more than can be attributed, the difference is shown as **Other** rather than quietly dropped.
 
+Reasoning gets its own **Thinking** row rather than hiding inside Conversation — on keep-thinking models it is a large, otherwise-invisible share (the opaque signature bytes are never counted or stored). And when pi's auto-compaction is on, the tokens it holds back appear as a **Compaction reserve** row and are subtracted from **Free space**, so the headroom shown is what you can actually use before compaction fires.
+
 ## `/usage quota`
 
 The one command here that touches the network, and only when you run it:
