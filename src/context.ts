@@ -149,6 +149,58 @@ export function buildBreakdown(input: BreakdownInput): ContextBreakdown {
   };
 }
 
+export interface UsedTokensInput {
+  /** pi's own estimate of context tokens (getContextUsage().tokens), or null. */
+  hostTokens: number | null;
+  /** pi's own percent-of-window (getContextUsage().percent), or null. */
+  hostPercent: number | null;
+  /** The context window; 0 when unknown. */
+  window: number;
+  /** The provider's report for the last request (input + cacheRead), or null. */
+  providerTokens: number | null;
+  /** A local content estimate (a hard lower bound), when one is available. */
+  estimate?: number;
+}
+
+/**
+ * Reconcile the several "how full is the window" signals into one used-tokens
+ * figure, so the gauge does not blindly trust a provider number that some
+ * backends report wrong (cumulative totals, cache-inflated counts, or an
+ * implausibly small figure). The rule — from minuque/pi-cc-extensions'
+ * resolveUsedTokens:
+ *
+ *  - the provider's report is the primary signal (it is the real last request),
+ *  - but when it diverges beyond tolerance from pi's own percent×window reading
+ *    (what pi itself uses for the gauge and for compaction), trust pi's number,
+ *  - and never report fewer tokens than the content visibly in context.
+ *
+ * Returns null only when nothing is known (so the gauge can hide itself).
+ */
+export function resolveUsedTokens(input: UsedTokensInput): number | null {
+  const w = input.window > 0 ? input.window : 0;
+  const fromPercent = input.hostPercent !== null && w > 0 ? (input.hostPercent / 100) * w : null;
+  const host = input.hostTokens !== null ? input.hostTokens : fromPercent;
+  const provider = input.providerTokens !== null && input.providerTokens > 0 ? input.providerTokens : null;
+  const estimate = typeof input.estimate === "number" && input.estimate > 0 ? input.estimate : null;
+
+  let used = provider ?? host ?? estimate;
+  if (used === null || used === undefined) return null;
+
+  // Trust pi's own reading when the provider's number diverges beyond tolerance
+  // (25% of the host reading, or 2k tokens, whichever is larger).
+  if (provider !== null && host !== null) {
+    const tolerance = Math.max(2000, host * 0.25);
+    if (Math.abs(provider - host) > tolerance) used = host;
+  }
+
+  // A content estimate is a hard floor: you cannot be using fewer tokens than
+  // the text that is demonstrably in context.
+  if (estimate !== null && estimate > used) used = estimate;
+
+  if (w > 0) used = Math.min(used, w);
+  return Math.max(0, Math.round(used));
+}
+
 const BAR_WIDTH = 28;
 
 function bar(fraction: number): string {

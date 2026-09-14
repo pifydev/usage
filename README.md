@@ -62,6 +62,8 @@ Computed entirely from what pi already holds: the assembled system prompt, the f
 
 Context files and skills are counted only when their text is genuinely embedded in the prompt, and the system-prompt row is the remainder after subtracting them, so the rows sum to the whole instead of double-counting. When the provider reports more than can be attributed, the difference is shown as **Other** rather than quietly dropped.
 
+The "used" figure and the footer gauge are reconciled across three signals — pi's own `getContextUsage()` reading, the provider's last-request report, and the local content estimate — so a backend that reports a wrong number (a cumulative or cache-inflated total, or an implausibly small one) can't throw the gauge off: the provider's report is used when it agrees with pi's percent×window, pi's reading is trusted when they diverge beyond tolerance, and the figure is never allowed below the tokens visibly in context. (The reconciliation rule is from minuque/pi-cc-extensions.)
+
 Reasoning gets its own **Thinking** row rather than hiding inside Conversation — on keep-thinking models it is a large, otherwise-invisible share (the opaque signature bytes are never counted or stored). And when pi's auto-compaction is on, the tokens it holds back appear as a **Compaction reserve** row and are subtracted from **Free space**, so the headroom shown is what you can actually use before compaction fires.
 
 ## `/usage quota`

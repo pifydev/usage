@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 
 import { addRecord, aggregate, recordFromEntry, windowTotals } from "../src/aggregate.ts";
-import { buildBreakdown, formatBreakdown } from "../src/context.ts";
+import { buildBreakdown, formatBreakdown, resolveUsedTokens } from "../src/context.ts";
 import { contextGauge, footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
 import { QUOTA_PROVIDERS, fetchQuota, quotaReport, type QuotaResult } from "../src/quota.ts";
 import { redact } from "../src/redact.ts";
@@ -73,9 +73,20 @@ export default function usage(pi: ExtensionAPI) {
   }
 
   function contextPct(ctx: UiContext): number | null {
-    const window = (ctx.model as { contextWindow?: number } | null)?.contextWindow;
-    if (!window || lastPromptTokens === 0) return null;
-    return Math.min(100, (lastPromptTokens / window) * 100);
+    const usage = (
+      ctx as { getContextUsage?: () => { tokens?: number | null; contextWindow?: number; percent?: number | null } | undefined }
+    ).getContextUsage?.();
+    const window = usage?.contextWindow ?? (ctx.model as { contextWindow?: number } | null)?.contextWindow ?? 0;
+    // Reconcile pi's own reading with the provider's last-request report, rather
+    // than trusting the provider number blind (some backends report it wrong).
+    const used = resolveUsedTokens({
+      hostTokens: usage?.tokens ?? null,
+      hostPercent: usage?.percent ?? null,
+      window,
+      providerTokens: lastPromptTokens || null,
+    });
+    if (used === null || window <= 0) return null;
+    return Math.min(100, (used / window) * 100);
   }
 
   function dashboard(ctx: UiContext): string {
@@ -173,7 +184,7 @@ export default function usage(pi: ExtensionAPI) {
         skills?: unknown[];
         selectedTools?: string[];
       };
-      getContextUsage?: () => { contextWindow?: number; used?: number; total?: number } | undefined;
+      getContextUsage?: () => { tokens?: number | null; contextWindow?: number; percent?: number | null } | undefined;
       sessionManager?: { buildContextEntries?: () => unknown[]; getBranch?: () => unknown[] };
     };
 
@@ -204,7 +215,17 @@ export default function usage(pi: ExtensionAPI) {
       contextWindow,
       reserveTokens: compactionReserve(ctx),
     });
-    const reported = typeof usage?.used === "number" ? usage.used : lastPromptTokens || null;
+    // The provider's real last-request number is the primary "used" figure (it
+    // makes the "Other" row — what the provider counts that we can't attribute —
+    // meaningful), reconciled against pi's own reading and floored by the local
+    // estimate so a wrong provider total can't over- or under-state the window.
+    const reported = resolveUsedTokens({
+      hostTokens: usage?.tokens ?? null,
+      hostPercent: usage?.percent ?? null,
+      window: contextWindow,
+      providerTokens: lastPromptTokens || null,
+      estimate: breakdown.attributed,
+    });
     return formatBreakdown(breakdown, reported);
   }
 

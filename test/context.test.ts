@@ -5,6 +5,7 @@ import {
   embeddedTokens,
   estimateTextTokens,
   formatBreakdown,
+  resolveUsedTokens,
 } from "../src/context.ts";
 
 const AGENTS_MD = "Always run bun test before committing. ".repeat(20);
@@ -167,4 +168,56 @@ test("a provider number below our estimate never shrinks the rows", () => {
   // used is the max of the two, so percentages stay sane
   assert.ok(!/-\d/.test(text), "no negative values");
   assert.ok(!/Other/.test(text));
+});
+
+test("resolveUsedTokens takes the provider report when it agrees with pi", () => {
+  const used = resolveUsedTokens({
+    hostTokens: 120_000,
+    hostPercent: 60,
+    window: 200_000,
+    providerTokens: 122_000,
+  });
+  assert.equal(used, 122_000); // within tolerance → the more precise provider number
+});
+
+test("resolveUsedTokens trusts pi's reading when the provider diverges wildly", () => {
+  // A provider that reports a cumulative/inflated 900k against a 200k window
+  // where pi says 60% → trust 60% × 200k = 120k, and clamp to the window.
+  const used = resolveUsedTokens({
+    hostTokens: null,
+    hostPercent: 60,
+    window: 200_000,
+    providerTokens: 900_000,
+  });
+  assert.equal(used, 120_000);
+});
+
+test("resolveUsedTokens falls back to the provider when pi has no reading", () => {
+  assert.equal(
+    resolveUsedTokens({ hostTokens: null, hostPercent: null, window: 200_000, providerTokens: 80_000 }),
+    80_000,
+  );
+});
+
+test("resolveUsedTokens floors by the content estimate (never below visible content)", () => {
+  // Provider under-reports 5k but we can see ~90k of content → report 90k.
+  const used = resolveUsedTokens({
+    hostTokens: null,
+    hostPercent: null,
+    window: 200_000,
+    providerTokens: 5_000,
+    estimate: 90_000,
+  });
+  assert.equal(used, 90_000);
+});
+
+test("resolveUsedTokens clamps to the window and returns null when nothing is known", () => {
+  assert.equal(
+    resolveUsedTokens({ hostTokens: 250_000, hostPercent: null, window: 200_000, providerTokens: null }),
+    200_000,
+  );
+  assert.equal(
+    resolveUsedTokens({ hostTokens: null, hostPercent: null, window: 0, providerTokens: null }),
+    null,
+  );
 });
