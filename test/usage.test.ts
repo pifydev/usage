@@ -71,6 +71,40 @@ test("recordFromEntry counts non-assistant usage too (tool-result/compaction)", 
   assert.equal(r!.totalTokens, 500);
 });
 
+test("recordFromEntry reads entry-level usage on compaction/branch_summary entries", () => {
+  // pi stores the summariser's usage on the entry itself (no `message`); these
+  // are the priciest calls in a session and were previously dropped.
+  const compaction = recordFromEntry({
+    type: "compaction",
+    timestamp: "2026-09-04T12:00:00.000Z",
+    summary: "…",
+    usage: { input: 150_000, output: 2_000, cacheRead: 0, cacheWrite: 0, totalTokens: 152_000, cost: { total: 0.48 } },
+  });
+  assert.ok(compaction, "a compaction entry with usage is counted");
+  assert.equal(compaction!.totalTokens, 152_000);
+  assert.equal(compaction!.cost, 0.48);
+  assert.equal(compaction!.model, "compaction", "labelled by entry type, not 'unknown'");
+  assert.equal(compaction!.provider, "unknown");
+  assert.ok(compaction!.timestamp > 0);
+
+  const branch = recordFromEntry({
+    type: "branch_summary",
+    timestamp: "2026-09-04T12:00:00.000Z",
+    summary: "…",
+    usage: { input: 40_000, output: 500, cacheRead: 0, cacheWrite: 0, totalTokens: 40_500, cost: { total: 0.12 } },
+  });
+  assert.equal(branch!.model, "branch_summary");
+  assert.equal(branch!.cost, 0.12);
+
+  // A compaction with no usage (e.g. an extension-provided one) is still skipped.
+  assert.equal(recordFromEntry({ type: "compaction", summary: "…" }), null);
+  // entry.usage is only honoured for the two summary types, not arbitrary entries.
+  assert.equal(
+    recordFromEntry({ type: "custom", usage: { totalTokens: 100, cost: { total: 0.01 } } }),
+    null,
+  );
+});
+
 test("recordFromLine tolerates junk lines", () => {
   assert.equal(recordFromLine(""), null);
   assert.equal(recordFromLine("not json"), null);

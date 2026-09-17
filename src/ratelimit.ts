@@ -23,8 +23,14 @@ export interface RateLimitSnapshot {
   tokensRemaining: number | null;
   /** When the window resets — provider's own string (seconds, ISO, or duration). */
   resets: string | null;
-  /** A unified subscription-window fraction 0..1 remaining, Anthropic OAuth only. */
-  unifiedRemaining: number | null;
+  /** Fraction 0..1 of the unified 5-hour subscription window still free (Anthropic OAuth). */
+  unified5hRemaining: number | null;
+  /** Fraction 0..1 of the unified 7-day subscription window still free (Anthropic OAuth). */
+  unified7dRemaining: number | null;
+  /** Which unified window Anthropic marks as binding, from -representative-claim. */
+  unifiedBinding: "5h" | "7d" | null;
+  /** Unified subscription status: "allowed" | "allowed_warning" | "rejected". */
+  unifiedStatus: string | null;
   /** Which header family this came from, for the report line. */
   source: "anthropic" | "openai" | "openrouter";
   capturedAtMs: number;
@@ -35,6 +41,14 @@ function intOf(headers: Record<string, string>, key: string): number | null {
   if (raw === undefined) return null;
   const n = Number.parseInt(String(raw), 10);
   return Number.isFinite(n) ? n : null;
+}
+
+/** A fraction 0..1 (Anthropic reports utilization as a decimal fraction USED). */
+function fracOf(headers: Record<string, string>, key: string): number | null {
+  const raw = headers[key] ?? headers[key.toLowerCase()];
+  if (raw === undefined) return null;
+  const n = Number.parseFloat(String(raw));
+  return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : null;
 }
 
 function strOf(headers: Record<string, string>, key: string): string | null {
@@ -69,20 +83,30 @@ export function parseRateLimit(
   if (family === "anthropic") {
     const reqs = intOf(h, "anthropic-ratelimit-requests-remaining");
     const toks = intOf(h, "anthropic-ratelimit-tokens-remaining");
-    // The OAuth Pro/Max unified subscription window, reported as a percentage.
-    const unifiedRaw = strOf(h, "anthropic-ratelimit-unified-status")
-      ? intOf(h, "anthropic-ratelimit-unified-remaining")
-      : intOf(h, "anthropic-ratelimit-unified-remaining");
-    if (reqs !== null || toks !== null || unifiedRaw !== null) {
+    // The OAuth Pro/Max unified subscription windows. Anthropic reports
+    // UTILIZATION — the fraction USED, 0..1 — for a 5-hour and a 7-day window
+    // (there is no "-remaining" header), plus which window is binding
+    // (-representative-claim) and an overall status. Remaining = 1 − utilization.
+    const util5h = fracOf(h, "anthropic-ratelimit-unified-5h-utilization");
+    const util7d = fracOf(h, "anthropic-ratelimit-unified-7d-utilization");
+    const claim = strOf(h, "anthropic-ratelimit-unified-representative-claim");
+    const unifiedStatus = strOf(h, "anthropic-ratelimit-unified-status");
+    const hasUnified = util5h !== null || util7d !== null || unifiedStatus !== null;
+    if (reqs !== null || toks !== null || hasUnified) {
       snap = {
         provider,
         requestsRemaining: reqs,
         tokensRemaining: toks,
         resets:
           strOf(h, "anthropic-ratelimit-unified-reset") ??
+          strOf(h, "anthropic-ratelimit-unified-5h-reset") ??
+          strOf(h, "anthropic-ratelimit-unified-7d-reset") ??
           strOf(h, "anthropic-ratelimit-tokens-reset") ??
           strOf(h, "anthropic-ratelimit-requests-reset"),
-        unifiedRemaining: unifiedRaw === null ? null : Math.max(0, Math.min(1, unifiedRaw / 100)),
+        unified5hRemaining: util5h === null ? null : 1 - util5h,
+        unified7dRemaining: util7d === null ? null : 1 - util7d,
+        unifiedBinding: claim === "5h" || claim === "7d" ? claim : null,
+        unifiedStatus,
         source: "anthropic",
         capturedAtMs: nowMs,
       };
@@ -96,7 +120,10 @@ export function parseRateLimit(
         requestsRemaining: reqs,
         tokensRemaining: toks,
         resets: strOf(h, "x-ratelimit-reset-tokens") ?? strOf(h, "x-ratelimit-reset-requests"),
-        unifiedRemaining: null,
+        unified5hRemaining: null,
+        unified7dRemaining: null,
+        unifiedBinding: null,
+        unifiedStatus: null,
         source: "openai",
         capturedAtMs: nowMs,
       };
@@ -110,7 +137,10 @@ export function parseRateLimit(
         requestsRemaining: remaining,
         tokensRemaining: null,
         resets: strOf(h, "x-ratelimit-reset"),
-        unifiedRemaining: null,
+        unified5hRemaining: null,
+        unified7dRemaining: null,
+        unifiedBinding: null,
+        unifiedStatus: null,
         source: "openrouter",
         capturedAtMs: nowMs,
       };
@@ -120,14 +150,45 @@ export function parseRateLimit(
   return snap;
 }
 
+/**
+ * Anthropic's unified reset is epoch SECONDS; render it as a readable local
+ * time. Other providers' values (ISO strings, "6s" durations, openrouter's
+ * epoch millis) are left untouched, so this only reinterprets the anthropic
+ * numeric case.
+ */
+function formatReset(snap: RateLimitSnapshot): string {
+  const raw = snap.resets;
+  if (!raw) return "";
+  if (snap.source === "anthropic" && /^\d{9,}$/.test(raw)) {
+    const d = new Date(Number.parseInt(raw, 10) * 1000);
+    if (Number.isFinite(d.getTime())) return d.toLocaleString();
+  }
+  return raw;
+}
+
 /** One human line for the /usage quota report; null when nothing was captured. */
 export function formatRateLimit(snap: RateLimitSnapshot | null): string | null {
   if (!snap) return null;
   const parts: string[] = [];
-  if (snap.unifiedRemaining !== null) parts.push(`${Math.round(snap.unifiedRemaining * 100)}% of subscription window left`);
+  // Surface the subscription status only when it is not the ordinary "allowed",
+  // so a healthy window does not add noise but a warning/rejection is visible.
+  if (snap.unifiedStatus && snap.unifiedStatus !== "allowed") {
+    parts.push(`subscription ${snap.unifiedStatus.replace(/_/g, " ")}`);
+  }
+  if (snap.unified5hRemaining !== null) {
+    parts.push(
+      `${Math.round(snap.unified5hRemaining * 100)}% of 5h window left${snap.unifiedBinding === "5h" ? " (binding)" : ""}`,
+    );
+  }
+  if (snap.unified7dRemaining !== null) {
+    parts.push(
+      `${Math.round(snap.unified7dRemaining * 100)}% of 7d window left${snap.unifiedBinding === "7d" ? " (binding)" : ""}`,
+    );
+  }
   if (snap.requestsRemaining !== null) parts.push(`${snap.requestsRemaining} requests left`);
   if (snap.tokensRemaining !== null) parts.push(`${snap.tokensRemaining} tokens left`);
   if (parts.length === 0) return null;
-  const when = snap.resets ? `, resets ${snap.resets}` : "";
+  const reset = formatReset(snap);
+  const when = reset ? `, resets ${reset}` : "";
   return `${snap.provider}: ${parts.join(", ")}${when} (from response headers)`;
 }

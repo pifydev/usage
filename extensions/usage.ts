@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 
 import { addRecord, aggregate, recordFromEntry, windowTotals } from "../src/aggregate.ts";
-import { buildBreakdown, formatBreakdown, resolveUsedTokens } from "../src/context.ts";
+import { buildBreakdown, contextTokensFromUsage, formatBreakdown, resolveUsedTokens } from "../src/context.ts";
 import { contextGauge, footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
 import { QUOTA_PROVIDERS, fetchQuota, quotaReport, type QuotaResult } from "../src/quota.ts";
 import { redact } from "../src/redact.ts";
@@ -41,7 +41,12 @@ type UiContext = ExtensionContext;
 
 export default function usage(pi: ExtensionAPI) {
   let session: UsageTotals = emptyTotals();
-  /** input+cacheRead of the most recent assistant message ≈ context size. */
+  /**
+   * The most recent assistant turn's context size, via pi's own
+   * calculateContextTokens (totalTokens, or input+output+cacheRead+cacheWrite).
+   * Cleared on compaction until the next post-compaction response, matching
+   * what pi's getContextUsage reports.
+   */
   let lastPromptTokens = 0;
   /**
    * The latest rate-limit headers seen per provider — passive quota, captured
@@ -68,11 +73,17 @@ export default function usage(pi: ExtensionAPI) {
       ctx.ui.setStatus("usage", undefined);
       return;
     }
-    const gauge = contextGauge(contextPct(ctx));
+    const gauge = contextGauge(contextInfo(ctx).pct);
     ctx.ui.setStatus("usage", gauge ? `${base} · ${gauge}` : base);
   }
 
-  function contextPct(ctx: UiContext): number | null {
+  /**
+   * The context fill percentage and the window it is measured against. The
+   * window is returned alongside the percentage so callers (the usage_status
+   * tool) can name the window without recomputing it. `pct` is null when there
+   * is nothing to measure (no window, or nothing known about usage).
+   */
+  function contextInfo(ctx: UiContext): { pct: number | null; window: number } {
     const usage = (
       ctx as { getContextUsage?: () => { tokens?: number | null; contextWindow?: number; percent?: number | null } | undefined }
     ).getContextUsage?.();
@@ -85,8 +96,8 @@ export default function usage(pi: ExtensionAPI) {
       window,
       providerTokens: lastPromptTokens || null,
     });
-    if (used === null || window <= 0) return null;
-    return Math.min(100, (used / window) * 100);
+    if (used === null || window <= 0) return { pct: null, window };
+    return { pct: Math.min(100, (used / window) * 100), window };
   }
 
   function dashboard(ctx: UiContext): string {
@@ -94,7 +105,7 @@ export default function usage(pi: ExtensionAPI) {
       const scan = scanSessions(join(getAgentDir(), "sessions"));
       return [scan.records, scan.files] as const;
     })());
-    return [sessionBlock(session, contextPct(ctx)), historyBlock(history, Date.now())].join("\n\n");
+    return [sessionBlock(session, contextInfo(ctx).pct), historyBlock(history, Date.now())].join("\n\n");
   }
 
   // ── Live tracking ────────────────────────────────────────────────────
@@ -105,10 +116,10 @@ export default function usage(pi: ExtensionAPI) {
     addRecord(session, record);
     const message = (event as { message?: { role?: string; usage?: unknown } }).message;
     if (message?.role === "assistant" && isRecord(message.usage)) {
-      const input = message.usage.input;
-      const cacheRead = message.usage.cacheRead;
-      lastPromptTokens =
-        (typeof input === "number" ? input : 0) + (typeof cacheRead === "number" ? cacheRead : 0);
+      // Use pi's own formula so the gauge cannot drift below pi's reading —
+      // input+cacheRead alone dropped cacheWrite and output, a real slice of
+      // every Anthropic prompt-cached turn.
+      lastPromptTokens = contextTokensFromUsage(message.usage);
     }
     updateFooter(ctx);
   });
@@ -122,6 +133,31 @@ export default function usage(pi: ExtensionAPI) {
       if (record) addRecord(session, record);
     }
     updateFooter(ctx);
+  });
+
+  pi.on("session_compact", async (event, ctx) => {
+    // pi's getContextUsage returns {tokens:null} until the first post-compaction
+    // response, so the stale pre-compaction figure would otherwise keep the
+    // gauge and /context at the old ~90% right after /compact. Drop it and let
+    // the local estimate drive the number until the next assistant reply.
+    lastPromptTokens = 0;
+    // The summariser's own call is one of the priciest turns in a session and
+    // fires no message_end (it is a direct completion, not the agent loop), so
+    // fold its usage — carried on the compaction entry itself — into the live
+    // footer and session totals here.
+    const record = recordFromEntry((event as { compactionEntry?: unknown }).compactionEntry);
+    if (record) addRecord(session, record);
+    updateFooter(ctx);
+  });
+
+  pi.on("session_tree", async (event, ctx) => {
+    // A branch summary is generated the same way (a direct completion), with its
+    // usage on the summary entry; count it so tree navigation is not free.
+    const record = recordFromEntry((event as { summaryEntry?: unknown }).summaryEntry);
+    if (record) {
+      addRecord(session, record);
+      updateFooter(ctx);
+    }
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -289,21 +325,30 @@ export default function usage(pi: ExtensionAPI) {
     label: "Usage status",
     promptSnippet: "Tokens, cost, and context used so far this session",
     description:
-      "Current session token/cost totals plus today's local aggregate. Use when deciding whether " +
-      "an expensive approach (large reads, many subagents) is proportionate.",
+      "Current session token/cost totals, today's local aggregate, and how full the context " +
+      "window is. Use when deciding whether an expensive approach (large reads, many subagents) " +
+      "is proportionate, or whether to /compact first.",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const scan = scanSessions(join(getAgentDir(), "sessions"));
       const history = aggregate(scan.records, scan.files);
       const today = windowTotals(history.byDay, 1, Date.now());
-      const text = [
+      const lines = [
         `Session: ${formatTokens(session.totalTokens)} tokens, ${formatCost(session.cost)} across ${session.messages} responses.`,
         `Today (all sessions): ${formatTokens(today.totalTokens)} tokens, ${formatCost(today.cost)}.`,
-      ].join("\n");
-      void ctx;
+      ];
+      // The snippet promises "context used", and the skill tells the model to
+      // call this before large reads — so return the one number that decides
+      // whether the read fits, with a hint to compact when the window is tight.
+      const { pct, window } = contextInfo(ctx);
+      const contextPercent = pct === null ? null : Math.round(pct);
+      if (pct !== null) {
+        const hint = pct >= 80 ? " — consider /compact before large reads" : "";
+        lines.push(`Context: ~${contextPercent}% of the ${formatTokens(window)} window used${hint}.`);
+      }
       return {
-        content: [{ type: "text", text }],
-        details: { session, today },
+        content: [{ type: "text", text: lines.join("\n") }],
+        details: { session, today, contextPercent, contextWindow: window },
       };
     },
   });

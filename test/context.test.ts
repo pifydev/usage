@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildBreakdown,
+  contentChars,
+  contextTokensFromUsage,
   embeddedTokens,
   estimateTextTokens,
   formatBreakdown,
@@ -168,6 +170,70 @@ test("a provider number below our estimate never shrinks the rows", () => {
   // used is the max of the two, so percentages stay sane
   assert.ok(!/-\d/.test(text), "no negative values");
   assert.ok(!/Other/.test(text));
+});
+
+test("contextTokensFromUsage matches pi's calculateContextTokens (cacheWrite + output counted)", () => {
+  // An Anthropic prompt-cached turn: cacheWrite and output are a real slice of
+  // the prompt. The old input+cacheRead formula would report 80,500.
+  const usage = { input: 500, output: 1000, cacheRead: 80_000, cacheWrite: 20_000, totalTokens: 101_500 };
+  assert.equal(contextTokensFromUsage(usage), 101_500);
+  // No totalTokens → sum of the four components, not input+cacheRead.
+  assert.equal(contextTokensFromUsage({ input: 500, output: 1000, cacheRead: 80_000, cacheWrite: 20_000 }), 101_500);
+  // totalTokens of 0 is falsy, so it falls back to the sum (matching pi's `||`).
+  assert.equal(contextTokensFromUsage({ input: 5, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }), 6);
+  // Negative/NaN/missing fields clamp to 0 rather than poisoning the sum.
+  assert.equal(contextTokensFromUsage({ input: 5, output: -3, cacheRead: Number.NaN }), 5);
+  assert.equal(contextTokensFromUsage(null), 0);
+  assert.equal(contextTokensFromUsage("nonsense"), 0);
+});
+
+test("a base64 image in a tool result is charged at pi's flat rate, not its bytes", () => {
+  // pi's read tool returns image blocks; the base64 `data` must not be billed
+  // as chars/4, or one screenshot reads as ~200k tokens and pins /context.
+  const image = { type: "image", data: "A".repeat(800_000), mimeType: "image/png" };
+  const entries = [
+    { type: "message", message: { role: "toolResult", toolName: "read", content: [image] } },
+  ];
+  const breakdown = input({ entries });
+  const toolResults = breakdown.parts.find((p) => p.label === "Tool results")!.tokens;
+  // 4800 chars / 4 = 1200 tokens, regardless of the 800k base64 bytes.
+  assert.equal(toolResults, 1200);
+  // contentChars mirrors pi: string length, text-block text, 4800 per image.
+  assert.equal(contentChars("hello"), 5);
+  assert.equal(contentChars([{ type: "text", text: "hi" }, image]), 2 + 4800);
+});
+
+test("a pasted screenshot in a user message is charged flat too", () => {
+  const image = { type: "image", data: "B".repeat(400_000), mimeType: "image/png" };
+  // Both the wrapped-entry path and the raw-message path carry user content.
+  const wrapped = input({
+    entries: [{ type: "message", message: { role: "user", content: [{ type: "text", text: "look" }, image] } }],
+  });
+  const raw = input({ entries: [{ role: "user", content: [{ type: "text", text: "look" }, image] }] });
+  const conv = (b: ReturnType<typeof input>) => b.parts.find((p) => p.label === "Conversation")!.tokens;
+  // ceil((4 + 4800) / 4) = 1201 in both cases, never the 100k of base64.
+  assert.equal(conv(wrapped), 1201);
+  assert.equal(conv(raw), 1201);
+});
+
+test("the report never prints above 100% even if a part overflows the window", () => {
+  // A pathological attributed total larger than the window (e.g. a stale scan)
+  // must clamp the header, not read as 115%.
+  const breakdown = input({ contextWindow: 10_000 });
+  const text = formatBreakdown(breakdown, 50_000);
+  assert.match(text, /of 10\.0k used \(100%\)/);
+  assert.match(text, /Free space[^\n]*\b0\b/);
+  assert.ok(!/(1[1-9]\d|[2-9]\d\d)%/.test(text), "no figure above 100%");
+});
+
+test("post-compaction contract: with no host and no provider signal, the estimate drives the figure", () => {
+  // Right after /compact the extension clears lastPromptTokens and pi returns
+  // null tokens; the local estimate is all that is left, and it must win alone
+  // (no stale pre-compaction 'Other' row).
+  assert.equal(
+    resolveUsedTokens({ hostTokens: null, hostPercent: null, window: 200_000, providerTokens: null, estimate: 25_000 }),
+    25_000,
+  );
 });
 
 test("resolveUsedTokens takes the provider report when it agrees with pi", () => {

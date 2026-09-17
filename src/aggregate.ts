@@ -71,16 +71,27 @@ export function windowTotals(byDay: Map<string, UsageTotals>, days: number, now:
 }
 
 /**
- * Extract a usage record from one parsed session-JSONL entry. Counts any
- * entry whose message carries a usage block (assistant turns dominate; pi
- * 0.81+ also persists tool-result/compaction usage the same way). Returns
- * null for entries without usage. Negative/NaN fields clamp to 0.
+ * Extract a usage record from one parsed session-JSONL entry. Assistant turns
+ * and tool results carry their usage on `entry.message.usage`. pi stores the
+ * summariser's usage one level up, on the compaction / branch_summary entry
+ * itself (these entries have no `message`), so those are read from
+ * `entry.usage` — otherwise the most expensive calls in a session go
+ * uncounted. Returns null for entries without usage; negative/NaN fields clamp
+ * to 0.
  */
 export function recordFromEntry(entry: unknown): UsageRecord | null {
   if (!isRecord(entry)) return null;
-  const message = entry.message;
-  if (!isRecord(message) || !isRecord(message.usage)) return null;
-  const usage = message.usage;
+  const message = isRecord(entry.message) ? entry.message : null;
+  const entryType = typeof entry.type === "string" ? entry.type : "";
+  const isSummary = entryType === "compaction" || entryType === "branch_summary";
+  const usage =
+    message && isRecord(message.usage)
+      ? message.usage
+      : isSummary && isRecord(entry.usage)
+        ? entry.usage
+        : null;
+  if (!usage) return null;
+
   const total = finite(usage.totalTokens);
   const cost = isRecord(usage.cost) ? finite(usage.cost.total) : 0;
   if (total === 0 && cost === 0) return null;
@@ -88,14 +99,20 @@ export function recordFromEntry(entry: unknown): UsageRecord | null {
   const ts =
     typeof entry.timestamp === "string"
       ? Date.parse(entry.timestamp)
-      : typeof message.timestamp === "number"
+      : message && typeof message.timestamp === "number"
         ? message.timestamp
         : Number.NaN;
 
+  // A summary entry has no model/provider of its own; label the bucket by the
+  // entry type rather than threading a running "last model" through the scan.
+  const model =
+    message && typeof message.model === "string" ? message.model : isSummary ? entryType : "unknown";
+  const provider = message && typeof message.provider === "string" ? message.provider : "unknown";
+
   return {
     timestamp: Number.isFinite(ts) ? ts : 0,
-    model: typeof message.model === "string" ? message.model : "unknown",
-    provider: typeof message.provider === "string" ? message.provider : "unknown",
+    model,
+    provider,
     project: "",
     input: finite(usage.input),
     output: finite(usage.output),

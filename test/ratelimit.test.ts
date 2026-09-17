@@ -4,23 +4,57 @@ import { parseRateLimit, formatRateLimit } from "../src/ratelimit.ts";
 
 const NOW = 1_700_000_000_000;
 
-test("anthropic rate-limit headers, including the OAuth subscription window", () => {
+// The Anthropic OAuth (Pro/Max) "unified" family, reconstructed from the
+// verifier's observation of live responses rather than captured here (no OAuth
+// credential in this environment): -unified-status, -representative-claim,
+// -5h-utilization / -7d-utilization (fraction USED, 0..1), and -unified-reset
+// (epoch SECONDS). There is no "-unified-remaining" header — the earlier code
+// invented one, so its test proved nothing.
+test("anthropic rate-limit headers, including the OAuth 5h/7d subscription windows", () => {
   const snap = parseRateLimit(
     "anthropic",
     {
       "anthropic-ratelimit-requests-remaining": "48",
       "anthropic-ratelimit-tokens-remaining": "180000",
-      "anthropic-ratelimit-unified-remaining": "72",
-      "anthropic-ratelimit-unified-reset": "2026-09-13T20:00:00Z",
+      "anthropic-ratelimit-unified-status": "allowed_warning",
+      "anthropic-ratelimit-unified-representative-claim": "7d",
+      "anthropic-ratelimit-unified-5h-utilization": "0.28",
+      "anthropic-ratelimit-unified-7d-utilization": "0.91",
+      "anthropic-ratelimit-unified-reset": "1757793600",
     },
     NOW,
   )!;
   assert.equal(snap.source, "anthropic");
   assert.equal(snap.requestsRemaining, 48);
   assert.equal(snap.tokensRemaining, 180000);
-  assert.equal(snap.unifiedRemaining, 0.72);
-  assert.equal(snap.resets, "2026-09-13T20:00:00Z");
-  assert.match(formatRateLimit(snap)!, /72% of subscription window left/);
+  // utilization is the fraction USED; remaining is its complement.
+  assert.ok(Math.abs(snap.unified5hRemaining! - 0.72) < 1e-9);
+  assert.ok(Math.abs(snap.unified7dRemaining! - 0.09) < 1e-9);
+  assert.equal(snap.unifiedBinding, "7d");
+  assert.equal(snap.unifiedStatus, "allowed_warning");
+  const line = formatRateLimit(snap)!;
+  assert.match(line, /72% of 5h window left/);
+  assert.match(line, /9% of 7d window left \(binding\)/);
+  assert.match(line, /subscription allowed warning/);
+  // epoch seconds are rendered as a local time, not shown as the raw number.
+  assert.ok(!line.includes("1757793600"), "the raw epoch is not printed");
+});
+
+test("anthropic OAuth response with only unified headers still yields a snapshot", () => {
+  // OAuth responses may omit the API-key requests/tokens-remaining headers.
+  const snap = parseRateLimit(
+    "anthropic",
+    {
+      "anthropic-ratelimit-unified-status": "allowed",
+      "anthropic-ratelimit-unified-5h-utilization": "0.10",
+    },
+    NOW,
+  )!;
+  assert.ok(snap, "a unified-only bag is not dropped");
+  assert.equal(snap.requestsRemaining, null);
+  assert.ok(Math.abs(snap.unified5hRemaining! - 0.9) < 1e-9);
+  // a healthy "allowed" status is not repeated as noise in the line
+  assert.ok(!formatRateLimit(snap)!.includes("subscription"));
 });
 
 test("openai x-ratelimit headers", () => {
@@ -60,7 +94,10 @@ test("a bag with nothing useful, or an unknown provider, is null — never a wro
       requestsRemaining: null,
       tokensRemaining: null,
       resets: null,
-      unifiedRemaining: null,
+      unified5hRemaining: null,
+      unified7dRemaining: null,
+      unifiedBinding: null,
+      unifiedStatus: null,
       source: "openai",
       capturedAtMs: NOW,
     }),

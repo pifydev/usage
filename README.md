@@ -40,7 +40,7 @@ By project (all time)
   D--project-shop-api       $6.60 · 3.6M tok
 ```
 
-History counts every usage-bearing entry in pi's session JSONL — assistant turns plus the tool-result and compaction usage pi persists — so a session's total matches what you were billed rather than what the visible messages add up to. Negative and NaN fields clamp to zero, days are your **local** calendar days, and a per-file mtime cache keeps repeat scans instant.
+History counts every usage-bearing entry in pi's session JSONL — assistant turns plus the tool-result usage pi persists, and the summariser's own call, which pi records on the compaction and branch-summary entries themselves rather than on a message. Those summary calls are among the most expensive in a session, so counting them is what makes a session's total match what you were billed rather than what the visible messages add up to; they have no model of their own, so they group under a `compaction` / `branch_summary` label in the by-model view. The live footer and session totals fold the same summariser usage in as it happens (on compaction and tree navigation), so the number does not jump only after a reload. Negative and NaN fields clamp to zero, days are your **local** calendar days, and a per-file mtime cache keeps repeat scans instant.
 
 Per-project totals come for free: pi stores sessions one directory per project, so the dashboard can show where the money actually went.
 
@@ -60,9 +60,11 @@ Context window: 22.6k of 200.0k used (11%)
 
 Computed entirely from what pi already holds: the assembled system prompt, the files and skills embedded in it, the enabled tool definitions, and the entries that would be sent. No network, no model call.
 
-Context files and skills are counted only when their text is genuinely embedded in the prompt, and the system-prompt row is the remainder after subtracting them, so the rows sum to the whole instead of double-counting. When the provider reports more than can be attributed, the difference is shown as **Other** rather than quietly dropped.
+Context files and skills are counted only when their text is genuinely embedded in the prompt, and the system-prompt row is the remainder after subtracting them, so the rows sum to the whole instead of double-counting. When the provider reports more than can be attributed, the difference is shown as **Other** rather than quietly dropped. Image blocks (a `read` of a screenshot, a pasted image) are charged at pi's flat 4,800 chars each, not at the size of their base64 bytes, so one screenshot no longer reads as hundreds of thousands of tokens.
 
-The "used" figure and the footer gauge are reconciled across three signals — pi's own `getContextUsage()` reading, the provider's last-request report, and the local content estimate — so a backend that reports a wrong number (a cumulative or cache-inflated total, or an implausibly small one) can't throw the gauge off: the provider's report is used when it agrees with pi's percent×window, pi's reading is trusted when they diverge beyond tolerance, and the figure is never allowed below the tokens visibly in context. (The reconciliation rule is from minuque/pi-cc-extensions.)
+The "used" figure and the footer gauge are reconciled across three signals — pi's own `getContextUsage()` reading, the provider's last-request report, and the local content estimate — so a backend that reports a wrong number (a cumulative or cache-inflated total, or an implausibly small one) can't throw the gauge off: the provider's report is used when it agrees with pi's percent×window, pi's reading is trusted when they diverge beyond tolerance, and the figure is never allowed below the tokens visibly in context, nor above the window. The provider figure uses pi's own definition of context size — `totalTokens`, or `input + output + cacheRead + cacheWrite` — so it agrees with pi's footer rather than sitting low by the cache-write and output of each turn. (The reconciliation rule is from minuque/pi-cc-extensions.)
+
+Right after `/compact`, pi reports the context as unknown until the next response, and the gauge follows: the pre-compaction figure is dropped so `/context` shows the fresh local estimate instead of the old near-full number, and the gauge reappears once the next reply lands.
 
 Reasoning gets its own **Thinking** row rather than hiding inside Conversation — on keep-thinking models it is a large, otherwise-invisible share (the opaque signature bytes are never counted or stored). And when pi's auto-compaction is on, the tokens it holds back appear as a **Compaction reserve** row and are subtracted from **Free space**, so the headroom shown is what you can actually use before compaction fires.
 
@@ -81,7 +83,7 @@ Quota (DeepSeek · granted 10 · topped up 100)
 
 **Documented endpoints only.** OpenRouter's `/api/v1/key` and DeepSeek's `/user/balance` are published APIs that report a real balance. The subscription-quota endpoints available for some other providers are undocumented private APIs reverse-engineered from vendor CLIs — they break without notice and were never offered to third parties, so this package does not call them. A provider you have not configured is simply not shown; that is not a failure.
 
-**Rate limits, for free.** OpenAI, Anthropic and Gemini publish no balance API, but every completion response carries rate-limit headers, and pi hands them to extensions through `after_provider_response` — before the stream is read, at no cost when unsubscribed. So `/usage quota` also shows what the current provider reported on its last call — requests and tokens left in the window, and for an Anthropic OAuth subscription the unified-window percentage — captured passively from calls the session already made, with no extra request and no credential to handle.
+**Rate limits, for free.** OpenAI, Anthropic and Gemini publish no balance API, but every completion response carries rate-limit headers, and pi hands them to extensions through `after_provider_response` — before the stream is read, at no cost when unsubscribed. So `/usage quota` also shows what the current provider reported on its last call — requests and tokens left in the window, and for an Anthropic OAuth (Pro/Max) subscription the two unified windows it actually reports: the fraction of the 5-hour and 7-day windows still free (from the `-5h-utilization` / `-7d-utilization` headers, which state the fraction *used*), which of the two is currently binding, an `allowed_warning` / `rejected` status when the window is under pressure, and the reset time. All captured passively from calls the session already made, with no extra request and no credential to handle.
 
 **A credentialed request is pinned down**, because it carries your provider key:
 
@@ -97,7 +99,7 @@ Quota (DeepSeek · granted 10 · topped up 100)
 
 ### `usage_status`
 
-No parameters. Returns session and today's totals, so the agent can check the cost before committing to expensive work — a wide subagent fan-out, a large read — instead of finding out afterwards.
+No parameters. Returns session and today's totals plus how full the context window is (`~N% of the … window used`, with a `/compact` hint past 80%), so the agent can check both cost and remaining room before committing to expensive work — a wide subagent fan-out, a large read — instead of finding out afterwards.
 
 ## License
 

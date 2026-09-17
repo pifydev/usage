@@ -37,6 +37,58 @@ export function estimateTextTokens(value: unknown): number {
   return Math.max(0, Math.ceil(text.length / 4));
 }
 
+function nonNegNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+/**
+ * The context size pi itself derives from a usage block — its own
+ * calculateContextTokens: `totalTokens` when present, else the sum of input +
+ * output + cacheRead + cacheWrite. Kept identical here so the footer gauge and
+ * /context agree with pi's reading; the earlier input+cacheRead formula dropped
+ * cacheWrite and output, which on Anthropic prompt caching are a real slice of
+ * every turn, leaving the gauge systematically low.
+ */
+export function contextTokensFromUsage(usage: unknown): number {
+  if (!isRecord(usage)) return 0;
+  const total = nonNegNumber(usage.totalTokens);
+  if (total > 0) return total;
+  return (
+    nonNegNumber(usage.input) +
+    nonNegNumber(usage.output) +
+    nonNegNumber(usage.cacheRead) +
+    nonNegNumber(usage.cacheWrite)
+  );
+}
+
+/** pi's fixed per-image charge; a base64 blob is never billed as its bytes. */
+const ESTIMATED_IMAGE_CHARS = 4800;
+
+/**
+ * Character count of message content the way pi's compaction estimator counts
+ * it (estimateTextAndImageContentChars): a string is its own length; a content
+ * array charges each text block's text and a flat 4800 chars per image block,
+ * ignoring every other field. Without this, JSON.stringify would bill an
+ * ImageContent block's base64 `data` at chars/4 — one screenshot then reads as
+ * hundreds of k tokens and pins /context at 100%.
+ */
+export function contentChars(content: unknown): number {
+  if (typeof content === "string") return content.length;
+  if (!Array.isArray(content)) return 0;
+  let chars = 0;
+  for (const block of content) {
+    if (!isRecord(block)) continue;
+    if (block.type === "text" && typeof block.text === "string") chars += block.text.length;
+    else if (block.type === "image") chars += ESTIMATED_IMAGE_CHARS;
+  }
+  return chars;
+}
+
+/** contentChars in tokens (chars/4), matching pi's estimateTokens. */
+function contentTokens(content: unknown): number {
+  return Math.ceil(contentChars(content) / 4);
+}
+
 /** Count a chunk only when the assembled prompt really contains it. */
 export function embeddedTokens(systemPrompt: string, chunk: string): number {
   if (!chunk || !systemPrompt.includes(chunk)) return 0;
@@ -78,7 +130,10 @@ function foldEntries(entries: unknown[]): { conversation: number; toolResults: n
     const role = typeof message.role === "string" ? message.role : null;
 
     if (role === "toolResult" || role === "bashExecution") {
-      toolResults += estimateTextTokens(message.content ?? message.output ?? message);
+      // Tool results carry image blocks (pi's read tool returns them); charge
+      // those at pi's flat rate rather than the base64 bytes' chars/4.
+      const content = message.content ?? message.output;
+      toolResults += content === undefined ? estimateTextTokens(message) : contentTokens(content);
       continue;
     }
     if (role === "assistant" && Array.isArray(message.content)) {
@@ -102,10 +157,14 @@ function foldEntries(entries: unknown[]): { conversation: number; toolResults: n
       continue;
     }
     if (typeof entry.content === "string" || Array.isArray(entry.content)) {
-      conversation += estimateTextTokens(entry.content);
+      // A raw user message; its content may hold a pasted screenshot.
+      conversation += contentTokens(entry.content);
       continue;
     }
-    if (role) conversation += estimateTextTokens(message.content ?? message);
+    if (role) {
+      conversation +=
+        message.content === undefined ? estimateTextTokens(message) : contentTokens(message.content);
+    }
   }
 
   return { conversation, toolResults, thinking };
@@ -156,7 +215,11 @@ export interface UsedTokensInput {
   hostPercent: number | null;
   /** The context window; 0 when unknown. */
   window: number;
-  /** The provider's report for the last request (input + cacheRead), or null. */
+  /**
+   * The provider's report for the last request, via pi's own
+   * calculateContextTokens (totalTokens, or input+output+cacheRead+cacheWrite),
+   * or null.
+   */
   providerTokens: number | null;
   /** A local content estimate (a hard lower bound), when one is available. */
   estimate?: number;
@@ -228,7 +291,10 @@ function formatTokens(n: number): string {
  */
 export function formatBreakdown(breakdown: ContextBreakdown, reportedUsed: number | null): string {
   const window = breakdown.contextWindow;
-  const used = Math.max(reportedUsed ?? 0, breakdown.attributed);
+  // Clamp to the window so a stale or odd figure can never print above 100%
+  // (resolveUsedTokens already clamps its own result, but `attributed` does not).
+  const raw = Math.max(reportedUsed ?? 0, breakdown.attributed);
+  const used = window > 0 ? Math.min(window, raw) : raw;
   const other = Math.max(0, used - breakdown.attributed);
   // pi holds back a reserve for auto-compaction; real headroom excludes it, so
   // show it as its own row and subtract it from free space rather than letting
