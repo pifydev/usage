@@ -206,7 +206,10 @@ export default function usage(pi: ExtensionAPI) {
     try {
       const projectTrusted = (ctx as { isProjectTrusted?: () => boolean }).isProjectTrusted?.() ?? false;
       const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted });
-      return settings.getCompactionEnabled() ? Math.max(0, settings.getCompactionReserveTokens()) : 0;
+      // Per model since pi 0.86 (compaction.modelOverrides); the global value
+      // would misstate "free space" for a model with its own reserve.
+      const model = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+      return settings.getCompactionEnabled() ? Math.max(0, settings.getCompactionReserveTokens(model)) : 0;
     } catch {
       return 0;
     }
