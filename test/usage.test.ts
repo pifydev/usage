@@ -412,3 +412,28 @@ test("v0.3 quotaBlock never prints the key and states what is unknown", () => {
   const failed = quotaBlock({ ok: false, provider: "openrouter", reason: "HTTP 401" });
   assert.ok(failed.includes("unavailable — HTTP 401"));
 });
+
+test("recordFromEntry counts pi 0.87 type:usage entries (cache_warm) by their own model/provider", () => {
+  const warm = recordFromEntry({
+    type: "usage",
+    kind: "cache_warm",
+    provider: "anthropic",
+    model: "claude-opus-4-8",
+    timestamp: "2026-09-22T10:00:00.000Z",
+    usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 120_000, totalTokens: 120_010, cost: { total: 0.45 } },
+  });
+  assert.ok(warm, "a cache-warm usage entry is counted, as pi's own session totals count it");
+  assert.equal(warm!.totalTokens, 120_010);
+  assert.equal(warm!.cacheWrite, 120_000);
+  assert.equal(warm!.cost, 0.45);
+  assert.equal(warm!.model, "claude-opus-4-8");
+  assert.equal(warm!.provider, "anthropic");
+  assert.ok(warm!.timestamp > 0);
+
+  // No model on the entry: label by kind so the bucket is still readable.
+  const bare = recordFromEntry({ type: "usage", kind: "cache_warm", usage: { totalTokens: 5, cost: { total: 0.01 } } });
+  assert.equal(bare!.model, "cache_warm");
+
+  // A usage entry with no usage is still skipped.
+  assert.equal(recordFromEntry({ type: "usage", kind: "cache_warm" }), null);
+});

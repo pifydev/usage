@@ -76,18 +76,24 @@ export function windowTotals(byDay: Map<string, UsageTotals>, days: number, now:
  * summariser's usage one level up, on the compaction / branch_summary entry
  * itself (these entries have no `message`), so those are read from
  * `entry.usage` — otherwise the most expensive calls in a session go
- * uncounted. Returns null for entries without usage; negative/NaN fields clamp
- * to 0.
+ * uncounted. pi 0.87's standalone `usage` entries (cache warming) also carry
+ * their usage on the entry. Returns null for entries without usage;
+ * negative/NaN fields clamp to 0.
  */
 export function recordFromEntry(entry: unknown): UsageRecord | null {
   if (!isRecord(entry)) return null;
   const message = isRecord(entry.message) ? entry.message : null;
   const entryType = typeof entry.type === "string" ? entry.type : "";
   const isSummary = entryType === "compaction" || entryType === "branch_summary";
+  // pi 0.87 adds a standalone UsageEntry ({type:"usage", kind:"cache_warm",
+  // provider, model, usage}) for spend that belongs to no message — the cache
+  // warmer writes one per refresh, and pi folds it into its own session
+  // totals. It carries its own provider/model, unlike the summaries.
+  const isUsageEntry = entryType === "usage";
   const usage =
     message && isRecord(message.usage)
       ? message.usage
-      : isSummary && isRecord(entry.usage)
+      : (isSummary || isUsageEntry) && isRecord(entry.usage)
         ? entry.usage
         : null;
   if (!usage) return null;
@@ -105,9 +111,17 @@ export function recordFromEntry(entry: unknown): UsageRecord | null {
 
   // A summary entry has no model/provider of its own; label the bucket by the
   // entry type rather than threading a running "last model" through the scan.
+  // A usage entry names its model/provider itself; fall back to its kind.
+  const own = message ?? (isUsageEntry ? entry : null);
   const model =
-    message && typeof message.model === "string" ? message.model : isSummary ? entryType : "unknown";
-  const provider = message && typeof message.provider === "string" ? message.provider : "unknown";
+    own && typeof own.model === "string"
+      ? own.model
+      : isSummary
+        ? entryType
+        : isUsageEntry && typeof entry.kind === "string"
+          ? entry.kind
+          : "unknown";
+  const provider = own && typeof own.provider === "string" ? own.provider : "unknown";
 
   return {
     timestamp: Number.isFinite(ts) ? ts : 0,
