@@ -31,6 +31,7 @@ import { readFileSync } from "node:fs";
 import { addRecord, aggregate, recordFromEntry, windowTotals } from "../src/aggregate.ts";
 import { buildBreakdown, contextTokensFromUsage, formatBreakdown, resolveUsedTokens } from "../src/context.ts";
 import { contextGauge, footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
+import { childSpendTotal, onChildSpend, resetChildSpend } from "../src/child-cost.ts";
 import { QUOTA_PROVIDERS, fetchQuota, quotaReport, type QuotaResult } from "../src/quota.ts";
 import { redact } from "../src/redact.ts";
 import { scanSessions } from "../src/sessions.ts";
@@ -66,9 +67,17 @@ export default function usage(pi: ExtensionAPI) {
     if (snap) rateLimits.set(provider, snap);
   });
 
+  /**
+   * The ctx the footer is drawn into, for the child-spend listener: a child
+   * finishing a turn fires no pi event on the parent, so the tally calls back
+   * and the footer redraws into the latest session context.
+   */
+  let footerCtx: UiContext | null = null;
+  let stopChildSpend: (() => void) | null = null;
+
   function updateFooter(ctx: UiContext): void {
     if (!ctx.hasUI) return;
-    const base = footerText(session);
+    const base = footerText(session, childSpendTotal());
     if (!base) {
       ctx.ui.setStatus("usage", undefined);
       return;
@@ -105,7 +114,7 @@ export default function usage(pi: ExtensionAPI) {
       const scan = scanSessions(join(getAgentDir(), "sessions"));
       return [scan.records, scan.files] as const;
     })());
-    return [sessionBlock(session, contextInfo(ctx).pct), historyBlock(history, Date.now())].join("\n\n");
+    return [sessionBlock(session, contextInfo(ctx).pct, childSpendTotal()), historyBlock(history, Date.now())].join("\n\n");
   }
 
   // ── Live tracking ────────────────────────────────────────────────────
@@ -124,10 +133,23 @@ export default function usage(pi: ExtensionAPI) {
     updateFooter(ctx);
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     // Rebuild the session totals from the branch so /reload keeps the count.
     session = emptyTotals();
     lastPromptTokens = 0;
+    // Child spend is not in the branch, so a /reload must keep the tally; a
+    // new, resumed or forked session starts its own.
+    if ((event as { reason?: string }).reason !== "reload") resetChildSpend();
+    footerCtx = ctx;
+    stopChildSpend?.();
+    stopChildSpend = onChildSpend(() => {
+      if (!footerCtx) return;
+      try {
+        updateFooter(footerCtx);
+      } catch {
+        // a stale ctx after a switch; the next session_start rebinds it
+      }
+    });
     for (const entry of ctx.sessionManager.getBranch()) {
       const record = recordFromEntry(entry);
       if (record) addRecord(session, record);
@@ -161,6 +183,9 @@ export default function usage(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    stopChildSpend?.();
+    stopChildSpend = null;
+    footerCtx = null;
     if (ctx.hasUI) ctx.ui.setStatus("usage", undefined);
   });
 

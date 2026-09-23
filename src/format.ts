@@ -14,9 +14,20 @@ export function formatCost(n: number): string {
 }
 
 /** Footer text: short, live. Null clears the indicator. */
-export function footerText(session: UsageTotals): string | undefined {
-  if (session.messages === 0) return undefined;
-  return `📊 ${formatTokens(session.totalTokens)} tok · ${formatCost(session.cost)}`;
+/** Spend of child agent sessions (subagent/swarm/workflow), which is not in the session totals. */
+export interface ChildSpendLike {
+  cost: number;
+  tokens: number;
+}
+
+function hasChildSpend(children: ChildSpendLike | undefined): children is ChildSpendLike {
+  return !!children && (children.cost > 0 || children.tokens > 0);
+}
+
+export function footerText(session: UsageTotals, children?: ChildSpendLike): string | undefined {
+  const agents = hasChildSpend(children) ? ` · agents ${formatCost(children.cost)}` : "";
+  if (session.messages === 0) return agents ? `📊 0 tok · $0${agents}` : undefined;
+  return `📊 ${formatTokens(session.totalTokens)} tok · ${formatCost(session.cost)}${agents}`;
 }
 
 const GAUGE_CELLS = 6;
@@ -38,12 +49,17 @@ export function contextGauge(pct: number | null): string {
   return `${clamped >= 90 ? "⚠ " : ""}ctx ${bar} ${Math.round(clamped)}%`;
 }
 
-export function sessionBlock(session: UsageTotals, contextPct: number | null): string {
+export function sessionBlock(session: UsageTotals, contextPct: number | null, children?: ChildSpendLike): string {
   const lines = [
     "Session",
     `  tokens   in ${formatTokens(session.input)} · out ${formatTokens(session.output)} · cache ${formatTokens(session.cacheRead)} read / ${formatTokens(session.cacheWrite)} write`,
     `  cost     ${formatCost(session.cost)} (${session.messages} responses)`,
   ];
+  if (hasChildSpend(children)) {
+    // Child sessions of subagent/swarm/workflow run outside this branch; their
+    // spend is real and is NOT in the two lines above.
+    lines.push(`  agents   ${formatCost(children.cost)} · ${formatTokens(children.tokens)} tok in child sessions, on top of the above`);
+  }
   if (contextPct !== null) {
     lines.push(`  context  ~${Math.round(contextPct)}% of the window`);
   }

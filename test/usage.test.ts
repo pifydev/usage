@@ -437,3 +437,15 @@ test("recordFromEntry counts pi 0.87 type:usage entries (cache_warm) by their ow
   // A usage entry with no usage is still skipped.
   assert.equal(recordFromEntry({ type: "usage", kind: "cache_warm" }), null);
 });
+
+test("footer and session block show what child agent sessions spent, apart from the session's own totals", () => {
+  const totals = addRecord(emptyTotals(), record());
+  assert.equal(footerText(totals, { cost: 0, tokens: 0 }), "📊 6.2k tok · $0.05", "no children, no suffix");
+  assert.equal(footerText(totals, { cost: 0.12, tokens: 30_000 }), "📊 6.2k tok · $0.05 · agents $0.12");
+  // Children can spend before the parent has answered anything.
+  assert.equal(footerText(emptyTotals(), { cost: 0.12, tokens: 30_000 }), "📊 0 tok · $0 · agents $0.12");
+  assert.equal(footerText(emptyTotals(), { cost: 0, tokens: 0 }), undefined);
+  const block = sessionBlock(totals, null, { cost: 0.12, tokens: 30_000 });
+  assert.match(block, /agents   \$0\.12 · 30\.0k tok in child sessions, on top of the above/);
+  assert.ok(!sessionBlock(totals, null).includes("agents"));
+});

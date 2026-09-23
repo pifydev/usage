@@ -18,6 +18,8 @@ Spend is invisible until the invoice arrives, and by then you cannot tell which 
 
 Folded from each message's `usage.cost`, which pi already computes. It survives `/reload` by replaying the session branch rather than keeping a running total in memory.
 
+When [`@pify/subagent`](https://github.com/pifydev/subagent), [`@pify/swarm`](https://github.com/pifydev/swarm) or [`@pify/workflow`](https://github.com/pifydev/workflow) run child agents, those children are separate in-memory sessions whose spend never reaches this branch — a session that delegates used to look cheaper than it was. Those packages now add every child message's cost to a process-wide tally, and the footer shows it as a separate ` · agents $0.12` beside the session's own figure (the `/usage` session block has the same line, with tokens). It is kept apart on purpose: the session numbers stay what the branch says, and the agents figure is what the delegation cost on top. The tally survives `/reload` and starts over with a new session.
+
 The gauge on the right is how full the context window is — the third mid-session question, next to tokens and cost. It was computed for the `/usage` dashboard but shown only there; now it is live. It appears once there is a window to measure against (so not under `-p`) and turns to `⚠` past 90%, the point where "how full" stops being trivia and becomes a decision. For the breakdown of what filled it, run `/context`.
 
 ## `/usage`
