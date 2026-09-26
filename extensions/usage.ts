@@ -35,7 +35,7 @@ import { childSpendTotal, onChildSpend, resetChildSpend } from "../src/child-cos
 import { QUOTA_PROVIDERS, fetchQuota, quotaReport, type QuotaResult } from "../src/quota.ts";
 import { redact } from "../src/redact.ts";
 import { scanSessions } from "../src/sessions.ts";
-import { parseRateLimit, formatRateLimit, type RateLimitSnapshot } from "../src/ratelimit.ts";
+import { parseRateLimit, formatRateLimit, type RateLimitSnapshot, footerQuotaSegment } from "../src/ratelimit.ts";
 import { emptyTotals, isRecord, type UsageTotals } from "../src/types.ts";
 
 type UiContext = ExtensionContext;
@@ -83,7 +83,10 @@ export default function usage(pi: ExtensionAPI) {
       return;
     }
     const gauge = contextGauge(contextInfo(ctx).pct);
-    ctx.ui.setStatus("usage", gauge ? `${base} · ${gauge}` : base);
+    // The subscription wall, from the headers already captured for this
+    // provider: quiet while healthy, a short warning once it is close.
+    const quota = footerQuotaSegment(rateLimits.get((ctx.model as { provider?: string } | null)?.provider ?? ""));
+    ctx.ui.setStatus("usage", [base, gauge, quota].filter(Boolean).join(" · "));
   }
 
   /**

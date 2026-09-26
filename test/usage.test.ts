@@ -22,6 +22,7 @@ import {
   quotaReport,
 } from "../src/quota.ts";
 import { checkUrl, controlledGetJson } from "../src/http.ts";
+import { footerQuotaSegment, parseRateLimit, shortReset } from "../src/ratelimit.ts";
 import { redact } from "../src/redact.ts";
 import { emptyTotals, type UsageRecord } from "../src/types.ts";
 
@@ -448,4 +449,51 @@ test("footer and session block show what child agent sessions spent, apart from 
   const block = sessionBlock(totals, null, { cost: 0.12, tokens: 30_000 });
   assert.match(block, /agents   \$0\.12 · 30\.0k tok in child sessions, on top of the above/);
   assert.ok(!sessionBlock(totals, null).includes("agents"));
+});
+
+test("the footer warns about the subscription wall only when it is close or the status is not allowed", () => {
+  const now = Date.UTC(2026, 8, 26, 10, 0, 0);
+  const at = (h: Record<string, string>) => parseRateLimit("anthropic", h, now);
+  // Healthy: plenty of both windows, status allowed → silence.
+  const healthy = at({
+    "anthropic-ratelimit-unified-5h-utilization": "0.2",
+    "anthropic-ratelimit-unified-7d-utilization": "0.4",
+    "anthropic-ratelimit-unified-representative-claim": "7d",
+    "anthropic-ratelimit-unified-status": "allowed",
+  });
+  assert.equal(footerQuotaSegment(healthy, now), "");
+  // The binding 7d window nearly gone → a short warning with its share left.
+  const low = at({
+    "anthropic-ratelimit-unified-5h-utilization": "0.2",
+    "anthropic-ratelimit-unified-7d-utilization": "0.92",
+    "anthropic-ratelimit-unified-representative-claim": "7d",
+    "anthropic-ratelimit-unified-status": "allowed",
+  });
+  assert.equal(footerQuotaSegment(low, now), "⚠ 7d 8%");
+  // A non-allowed status warns whatever the numbers say, and names it.
+  const walled = at({
+    "anthropic-ratelimit-unified-7d-utilization": "0.5",
+    "anthropic-ratelimit-unified-status": "allowed_warning",
+  });
+  assert.equal(footerQuotaSegment(walled, now), "⚠ 7d 50% allowed warning");
+  // Nothing captured, or another provider's snapshot, stays quiet.
+  assert.equal(footerQuotaSegment(null), "");
+  assert.equal(footerQuotaSegment(parseRateLimit("openai", { "x-ratelimit-remaining-requests": "5" }, now)), "");
+});
+
+test("shortReset renders Anthropic's epoch seconds compactly and leaves long values out of the footer", () => {
+  const now = Date.UTC(2026, 8, 26, 10, 0, 0);
+  const soon = parseRateLimit(
+    "anthropic",
+    { "anthropic-ratelimit-unified-7d-utilization": "0.9", "anthropic-ratelimit-unified-reset": String(Math.floor(now / 1000) + 3600) },
+    now,
+  )!;
+  assert.match(shortReset(soon, now), /^\d{2}:\d{2}$/);
+  const later = parseRateLimit(
+    "anthropic",
+    { "anthropic-ratelimit-unified-7d-utilization": "0.9", "anthropic-ratelimit-unified-reset": String(Math.floor(now / 1000) + 3 * 86400) },
+    now,
+  )!;
+  assert.match(shortReset(later, now), /^\d{2}-\d{2} \d{2}:\d{2}$/);
+  assert.match(footerQuotaSegment(soon, now), /^⚠ 7d 10% · resets \d{2}:\d{2}$/);
 });

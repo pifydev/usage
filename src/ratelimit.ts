@@ -166,6 +166,46 @@ function formatReset(snap: RateLimitSnapshot): string {
   return raw;
 }
 
+/** A reset time short enough for the footer: HH:MM today, otherwise MM-DD HH:MM; "" when unknown or unwieldy. */
+export function shortReset(snap: RateLimitSnapshot, now: number = Date.now()): string {
+  const raw = snap.resets;
+  if (!raw) return "";
+  if (snap.source === "anthropic" && /^\d{9,}$/.test(raw)) {
+    const d = new Date(Number.parseInt(raw, 10) * 1000);
+    if (!Number.isFinite(d.getTime())) return "";
+    const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    const sameDay = new Date(now).toDateString() === d.toDateString();
+    return sameDay ? hm : `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${hm}`;
+  }
+  return raw.length <= 12 ? raw : "";
+}
+
+/** Below this share of the binding window left, the footer starts warning. */
+export const FOOTER_WARN_FRACTION = 0.15;
+
+/**
+ * The footer's quota warning, or "" while the session is healthy. A Claude
+ * subscription user used to learn about the 5h/7d wall only when a turn
+ * stalled, or by opening `/usage quota` — the headers were captured either
+ * way. This shows the binding window once it is nearly gone, or whenever
+ * Anthropic marks the subscription as anything but "allowed". Non-Anthropic
+ * providers carry none of these fields, so it stays empty for them.
+ */
+export function footerQuotaSegment(snap: RateLimitSnapshot | null | undefined, now: number = Date.now()): string {
+  if (!snap) return "";
+  const binding =
+    snap.unifiedBinding ?? (snap.unified7dRemaining !== null ? "7d" : snap.unified5hRemaining !== null ? "5h" : null);
+  const remaining = binding === "7d" ? snap.unified7dRemaining : binding === "5h" ? snap.unified5hRemaining : null;
+  const walled = Boolean(snap.unifiedStatus && snap.unifiedStatus !== "allowed");
+  const low = remaining !== null && remaining < FOOTER_WARN_FRACTION;
+  if (!walled && !low) return "";
+  const parts = [`⚠ ${binding ?? "subscription"}`];
+  if (remaining !== null) parts.push(`${Math.max(0, Math.round(remaining * 100))}%`);
+  if (walled) parts.push(snap.unifiedStatus!.replace(/_/g, " "));
+  const reset = shortReset(snap, now);
+  return reset ? `${parts.join(" ")} · resets ${reset}` : parts.join(" ");
+}
+
 /** One human line for the /usage quota report; null when nothing was captured. */
 export function formatRateLimit(snap: RateLimitSnapshot | null): string | null {
   if (!snap) return null;
