@@ -12,7 +12,7 @@ import {
   windowTotals,
 } from "../src/aggregate.ts";
 import { contextGauge, footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
-import { clearScanCache, projectLabel, scanSessions } from "../src/sessions.ts";
+import { SCAN_CACHE_VERSION, clearScanCache, persistScanCache, projectLabel, restoreScanCache, scanSessions } from "../src/sessions.ts";
 import {
   fetchQuota,
   findProvider,
@@ -496,4 +496,33 @@ test("shortReset renders Anthropic's epoch seconds compactly and leaves long val
   )!;
   assert.match(shortReset(later, now), /^\d{2}-\d{2} \d{2}:\d{2}$/);
   assert.match(footerQuotaSegment(soon, now), /^⚠ 7d 10% · resets \d{2}:\d{2}$/);
+});
+
+test("the scan cache round-trips through disk, ignores a version mismatch, and keeps only files the last scan saw", () => {
+  const root = mkdtempSync(join(tmpdir(), "usage-cache-"));
+  try {
+    const sessions = join(root, "sessions", "proj");
+    mkdirSync(sessions, { recursive: true });
+    const file = join(sessions, "a.jsonl");
+    writeFileSync(file, `${JSON.stringify(entry({ totalTokens: 100, cost: { total: 0.01 } }))}\n`);
+    clearScanCache();
+    const first = scanSessions(join(root, "sessions"));
+    assert.equal(first.records.length, 1);
+    const cacheFile = join(root, "usage-scan-cache.json");
+    assert.equal(persistScanCache(cacheFile), 1);
+    clearScanCache();
+    assert.equal(restoreScanCache(cacheFile), 1);
+    const second = scanSessions(join(root, "sessions"));
+    assert.equal(second.records.length, 1, "served from the restored cache");
+    // A different version is ignored.
+    writeFileSync(cacheFile, JSON.stringify({ version: SCAN_CACHE_VERSION + 1, entries: {} }));
+    clearScanCache();
+    assert.equal(restoreScanCache(cacheFile), 0);
+    // Corrupt JSON is ignored too.
+    writeFileSync(cacheFile, "{not json");
+    assert.equal(restoreScanCache(cacheFile), 0);
+  } finally {
+    clearScanCache();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

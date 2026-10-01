@@ -32,9 +32,13 @@ import { addRecord, aggregate, recordFromEntry, windowTotals } from "../src/aggr
 import { buildBreakdown, contextTokensFromUsage, formatBreakdown, resolveUsedTokens } from "../src/context.ts";
 import { contextGauge, footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
 import { childSpendTotal, onChildSpend, resetChildSpend } from "../src/child-cost.ts";
+import { buildByDayCsv, buildByModelCsv, buildByProjectCsv, buildTotalsJson } from "../src/export.ts";
+import { emptyCacheHealth, observeCacheHealth } from "../src/cache-health.ts";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { QUOTA_PROVIDERS, fetchQuota, quotaReport, type QuotaResult } from "../src/quota.ts";
 import { redact } from "../src/redact.ts";
-import { scanSessions } from "../src/sessions.ts";
+import { scanSessions, persistScanCache, restoreScanCache } from "../src/sessions.ts";
 import { parseRateLimit, formatRateLimit, type RateLimitSnapshot, footerQuotaSegment } from "../src/ratelimit.ts";
 import { emptyTotals, isRecord, type UsageTotals } from "../src/types.ts";
 
@@ -112,9 +116,25 @@ export default function usage(pi: ExtensionAPI) {
     return { pct: Math.min(100, (used / window) * 100), window };
   }
 
+  /** The on-disk twin of the scan cache: read once before the first scan, written after each completed one. */
+  const scanCacheFile = () => join(getAgentDir(), "usage-scan-cache.json");
+  let scanCacheRestored = false;
+  function scanHistory() {
+    if (!scanCacheRestored) {
+      scanCacheRestored = true;
+      restoreScanCache(scanCacheFile());
+    }
+    const scan = scanSessions(join(getAgentDir(), "sessions"));
+    persistScanCache(scanCacheFile());
+    return scan;
+  }
+
+  /** Prompt-cache health for this session: warns once when a warm cache goes cold. */
+  let cacheHealth = emptyCacheHealth();
+
   function dashboard(ctx: UiContext): string {
     const history = aggregate(...(() => {
-      const scan = scanSessions(join(getAgentDir(), "sessions"));
+      const scan = scanHistory();
       return [scan.records, scan.files] as const;
     })());
     return [sessionBlock(session, contextInfo(ctx).pct, childSpendTotal()), historyBlock(history, Date.now())].join("\n\n");
@@ -128,6 +148,8 @@ export default function usage(pi: ExtensionAPI) {
     addRecord(session, record);
     const message = (event as { message?: { role?: string; usage?: unknown } }).message;
     if (message?.role === "assistant" && isRecord(message.usage)) {
+      const warning = observeCacheHealth(cacheHealth, message.usage as { input?: number; cacheRead?: number; cacheWrite?: number });
+      if (warning && ctx.hasUI) ctx.ui.notify(warning, "warning");
       // Use pi's own formula so the gauge cannot drift below pi's reading —
       // input+cacheRead alone dropped cacheWrite and output, a real slice of
       // every Anthropic prompt-cached turn.
@@ -143,6 +165,7 @@ export default function usage(pi: ExtensionAPI) {
     // Child spend is not in the branch, so a /reload must keep the tally; a
     // new, resumed or forked session starts its own.
     if ((event as { reason?: string }).reason !== "reload") resetChildSpend();
+    cacheHealth = emptyCacheHealth();
     footerCtx = ctx;
     stopChildSpend?.();
     stopChildSpend = onChildSpend(() => {
@@ -297,9 +320,31 @@ export default function usage(pi: ExtensionAPI) {
   }
 
   pi.registerCommand("usage", {
-    description: "Token and cost dashboard: /usage [context | quota]",
+    description: "Token and cost dashboard: /usage [context | quota | export]",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
+      if ((args ?? "").trim().toLowerCase() === "export") {
+        // Hand the history off: CSV per model/day/project and a totals JSON,
+        // in the OS temp dir by default (never the repo or home), or
+        // PIFY_USAGE_EXPORT_DIR. Full precision; the reader rounds.
+        const scan = scanHistory();
+        const history = aggregate(scan.records, scan.files);
+        const now = Date.now();
+        const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
+        const dir = join(process.env.PIFY_USAGE_EXPORT_DIR?.trim() || join(tmpdir(), "pify-usage"), stamp);
+        try {
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(join(dir, "by-model.csv"), buildByModelCsv(history.byModel));
+          writeFileSync(join(dir, "by-day.csv"), buildByDayCsv(history.byDay));
+          writeFileSync(join(dir, "by-project.csv"), buildByProjectCsv(history.byProject));
+          writeFileSync(join(dir, "totals.json"), buildTotalsJson(history.total, history.files, now));
+        } catch (err) {
+          ctx.ui.notify(`Export failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+          return;
+        }
+        ctx.ui.notify(`✓ Exported by-model.csv, by-day.csv, by-project.csv and totals.json to ${dir}`, "info");
+        return;
+      }
       if ((args ?? "").trim().toLowerCase() === "context") {
         // Documented since the breakdown landed, but never wired — the handler
         // only knew "quota", so `/usage context` quietly showed the dashboard.
@@ -361,7 +406,7 @@ export default function usage(pi: ExtensionAPI) {
       "is proportionate, or whether to /compact first.",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _onUpdate, ctx) {
-      const scan = scanSessions(join(getAgentDir(), "sessions"));
+      const scan = scanHistory();
       const history = aggregate(scan.records, scan.files);
       const today = windowTotals(history.byDay, 1, Date.now());
       const lines = [

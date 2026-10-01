@@ -44,6 +44,12 @@ By project (all time)
   D--project-shop-api       $6.60 · 3.6M tok
 ```
 
+`/usage export` writes the history out — `by-model.csv`, `by-day.csv`, `by-project.csv` and `totals.json`, full precision — into a timestamped folder under the OS temp directory (or `PIFY_USAGE_EXPORT_DIR`), never into the repository or your home, and prints the path.
+
+The per-file scan cache is also kept on disk (`usage-scan-cache.json` next to pi's other state, keyed by size and mtime, versioned), so a fresh `pi` no longer pays the whole cold scan on its first `/usage`: it is read once before the first scan and rewritten after each completed one; a corrupt or older file is ignored and rebuilt, and only files the latest scan saw are kept.
+
+Once a session has shown a healthy prompt-cache hit rate on a large prompt, five large prompts in a row at ~0% hit raise one warning naming the likely causes — a model or thinking-level switch, a provider dropping its cache, something rewriting the start of the context each turn — because from then on every turn re-bills the whole prefix and the footer alone only shows the spend climbing.
+
 History counts every usage-bearing entry in pi's session JSONL — assistant turns plus the tool-result usage pi persists, and the summariser's own call, which pi records on the compaction and branch-summary entries themselves rather than on a message. Those summary calls are among the most expensive in a session, so counting them is what makes a session's total match what you were billed rather than what the visible messages add up to; they have no model of their own, so they group under a `compaction` / `branch_summary` label in the by-model view. The live footer and session totals fold the same summariser usage in as it happens (on compaction and tree navigation), so the number does not jump only after a reload. pi 0.87's cache warmer spends real money outside any message too, as standalone `usage` entries; those are counted under their own model on reload and in history (pi raises no extension event for them, so the live footer picks them up at the next session start). Negative and NaN fields clamp to zero, days are your **local** calendar days, and a per-file mtime cache keeps repeat scans instant.
 
 Per-project totals come for free: pi stores sessions one directory per project, so the dashboard can show where the money actually went.
