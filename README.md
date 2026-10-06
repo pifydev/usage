@@ -44,7 +44,7 @@ By project (all time)
   D--project-shop-api       $6.60 · 3.6M tok
 ```
 
-`/usage export` writes the history out — `by-model.csv`, `by-day.csv`, `by-project.csv` and `totals.json`, full precision — into a timestamped folder under the OS temp directory (or `PIFY_USAGE_EXPORT_DIR`), never into the repository or your home, and prints the path.
+`/usage export` writes the history out — `by-model.csv`, `by-day.csv`, `by-project.csv` and `totals.json`, full precision — into a timestamped folder under the OS temp directory (or `PIFY_USAGE_EXPORT_DIR`), never into the repository or your home, readable by you only, and prints the path.
 
 The per-file scan cache is also kept on disk (`usage-scan-cache.json` next to pi's other state, keyed by size and mtime, versioned), so a fresh `pi` no longer pays the whole cold scan on its first `/usage`: it is read once before the first scan and rewritten after each completed one; a corrupt or older file is ignored and rebuilt, and only files the latest scan saw are kept.
 

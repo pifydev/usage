@@ -332,12 +332,16 @@ export default function usage(pi: ExtensionAPI) {
         const now = Date.now();
         const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
         const dir = join(process.env.PIFY_USAGE_EXPORT_DIR?.trim() || join(tmpdir(), "pify-usage"), stamp);
+        // Spend and project names are the user's business: the folder and
+        // files are readable by the user only, and `wx` never follows a link
+        // someone else placed at the path (pi 1.0.3's own output-file rule).
+        const fileOptions = { mode: 0o600, flag: "wx" } as const;
         try {
-          mkdirSync(dir, { recursive: true });
-          writeFileSync(join(dir, "by-model.csv"), buildByModelCsv(history.byModel));
-          writeFileSync(join(dir, "by-day.csv"), buildByDayCsv(history.byDay));
-          writeFileSync(join(dir, "by-project.csv"), buildByProjectCsv(history.byProject));
-          writeFileSync(join(dir, "totals.json"), buildTotalsJson(history.total, history.files, now));
+          mkdirSync(dir, { recursive: true, mode: 0o700 });
+          writeFileSync(join(dir, "by-model.csv"), buildByModelCsv(history.byModel), fileOptions);
+          writeFileSync(join(dir, "by-day.csv"), buildByDayCsv(history.byDay), fileOptions);
+          writeFileSync(join(dir, "by-project.csv"), buildByProjectCsv(history.byProject), fileOptions);
+          writeFileSync(join(dir, "totals.json"), buildTotalsJson(history.total, history.files, now), fileOptions);
         } catch (err) {
           ctx.ui.notify(`Export failed: ${err instanceof Error ? err.message : String(err)}`, "error");
           return;

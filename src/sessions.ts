@@ -65,7 +65,7 @@ export function persistScanCache(file: string): number {
   try {
     mkdirSync(dirname(file), { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ version: SCAN_CACHE_VERSION, entries }));
+    writeFileSync(tmp, JSON.stringify({ version: SCAN_CACHE_VERSION, entries }), { mode: 0o600 });
     renameSync(tmp, file);
   } catch {
     // An unwritable cache costs the next process one cold scan, nothing else.
