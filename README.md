@@ -20,9 +20,20 @@ Folded from each message's `usage.cost`, which pi already computes. It survives 
 
 When [`@pify/subagent`](https://github.com/pifydev/subagent), [`@pify/swarm`](https://github.com/pifydev/swarm) or [`@pify/workflow`](https://github.com/pifydev/workflow) run child agents, those children are separate in-memory sessions whose spend never reaches this branch — a session that delegates used to look cheaper than it was. Those packages now add every child message's cost to a process-wide tally, and the footer shows it as a separate ` · agents $0.12` beside the session's own figure (the `/usage` session block has the same line, with tokens). It is kept apart on purpose: the session numbers stay what the branch says, and the agents figure is what the delegation cost on top. The tally survives `/reload` and starts over with a new session.
 
-On a Claude subscription (OAuth Pro/Max) the footer also carries the wall you are approaching: the headers `/usage quota` reads were already captured on every response, but only that command showed them, so the weekly or 5-hour limit used to arrive as a stalled turn. Now a `⚠ 7d 8% · resets 14:05` segment appears once the binding window is below 15%, or whenever Anthropic marks the subscription as anything but allowed, and stays out of the way otherwise. Other providers carry no such headers, so they never show it.
+On a Claude subscription (OAuth Pro/Max) the footer also carries the wall you are approaching: the headers `/usage quota` reads were already captured on every response, but only that command showed them, so the weekly or 5-hour limit used to arrive as a stalled turn. Now a `⚠ 7d 8% · resets 14:05` segment appears once the binding window is below 15%, or whenever Anthropic marks the subscription as anything but allowed, and stays out of the way otherwise. This passive warning uses Anthropic's own response headers. Copilot and Codex subscription quotas are fetched explicitly, as described below.
 
 The gauge on the right is how full the context window is — the third mid-session question, next to tokens and cost. It was computed for the `/usage` dashboard but shown only there; now it is live. It appears once there is a window to measure against (so not under `-p`) and turns to `⚠` past 90%, the point where "how full" stops being trivia and becomes a decision. For the breakdown of what filled it, run `/context`.
+
+After `/usage quota`, the active Copilot or Codex provider also shows its cached remaining quota, before the session figures so compact status lines keep it visible:
+
+```
+Copilot premium 49% left · cached · 📊 12.3k tok · $0.45
+Codex 5h 75% left · 7d 40% left · cached · 📊 12.3k tok · $0.45
+```
+
+There is no background polling. Values live only in memory, are cleared on session start/reload, and are marked `stale` on the next footer redraw after fifteen minutes or a reported reset. Run the command again to refresh; the dashboard gives reset times in UTC. Missing or rejected data is not shown as zero remaining. Only the active provider's quota is displayed when switching models.
+
+The status key is namespaced as `pify-usage`. `/pify-usage` is an alias for every `/usage` subcommand, so a second extension registering `/usage` need not make this dashboard inaccessible. Pi disambiguates conflicting commands as `/usage:1`, `/usage:2`, etc.; bare `/usage` is unavailable in that case. `/pify-usage` stays unambiguous, while `/usage` remains backward compatible when this is the only usage extension.
 
 ## `/usage`
 
@@ -101,7 +112,11 @@ Quota (DeepSeek · granted 10 · topped up 100)
   balance  CNY 110.00
 ```
 
-**Documented endpoints only.** OpenRouter's `/api/v1/key` and DeepSeek's `/user/balance` are published APIs that report a real balance. The subscription-quota endpoints available for some other providers are undocumented private APIs reverse-engineered from vendor CLIs — they break without notice and were never offered to third parties, so this package does not call them. A provider you have not configured is simply not shown; that is not a failure.
+**Balances and subscription windows are different.** OpenRouter's `/api/v1/key` and DeepSeek's `/user/balance` are published balance APIs. Copilot premium interactions (or AI credits when token-based billing is reported) and Codex's primary/secondary windows are percentages **remaining**, not money or per-request rate limits. Unlimited quota is labelled explicitly. Only the active model's provider is checked; unused configured keys (for example an OpenRouter key) are not inspected or queried. Missing or unsupported credentials for that active provider produce an explicit unavailable reason.
+
+Copilot uses `https://api.github.com/copilot_internal/user`, published as `entitlementUrl` in [Microsoft's contributor documentation](https://github.com/microsoft/vscode-copilot-chat/blob/main/CONTRIBUTING.md). Codex uses `https://chatgpt.com/backend-api/wham/usage`, as implemented in [OpenAI's client](https://github.com/openai/codex/blob/main/codex-rs/backend-client/src/client.rs). OpenAI separately documents the [app-server `account/rateLimits/read` interface](https://developers.openai.com/codex/app-server/#auth-endpoints); that is not a versioned contract for the direct HTTP route. These published client endpoints may change without notice. An unrecognized response renders as unavailable rather than guessing a balance.
+
+`/usage quota` (or `/pify-usage quota`) is explicit consent for one quota request to the active provider's endpoint, with no recurring refresh. Sessions, model changes, `usage_status`, and footer redraws do not make quota requests.
 
 **Rate limits, for free.** OpenAI, Anthropic and Gemini publish no balance API, but every completion response carries rate-limit headers, and pi hands them to extensions through `after_provider_response` — before the stream is read, at no cost when unsubscribed. So `/usage quota` also shows what the current provider reported on its last call — requests and tokens left in the window, and for an Anthropic OAuth (Pro/Max) subscription the two unified windows it actually reports: the fraction of the 5-hour and 7-day windows still free (from the `-5h-utilization` / `-7d-utilization` headers, which state the fraction *used*), which of the two is currently binding, an `allowed_warning` / `rejected` status when the window is under pressure, and the reset time. All captured passively from calls the session already made, with no extra request and no credential to handle.
 
@@ -111,9 +126,9 @@ Quota (DeepSeek · granted 10 · topped up 100)
 - Redirects are refused outright. Following one lets whatever answered choose where the next request goes, with the header already attached.
 - A non-2xx body is **never read**. Error bodies echo request details back, and an echoed `Authorization` header pasted into a notification is exactly the leak this must not cause — the status alone becomes the message.
 - Raw exception text is dropped rather than shown, and everything printed passes a redactor as a last line of defence.
-- An 8-second timeout per provider; any failure renders as `unavailable — the provider rejected the key` rather than throwing.
+- An 8-second timeout per quota HTTP request; any failure renders as unavailable rather than throwing. Pi's own OAuth refresh may take additional time.
 
-**The key comes from pi**, resolved through `modelRegistry` rather than by reading `auth.json`. pi owns credential storage — env precedence, OAuth, whatever it grows next — and parsing that file here would mean handling secrets this package has no business touching, using a stale copy of pi's rules. Only the provider's own masked label is ever printed.
+**Credentials come from pi's public APIs**, not a second credential store or a package-owned `auth.json` parser. Balances use `modelRegistry` resolution. Both subscription endpoints require Pi OAuth login: Copilot uses the original GitHub login token obtained with Pi's `readStoredCredential` API, **never** the Copilot inference token. The token and endpoint are resolved together: public GitHub uses `api.github.com`, and GitHub Enterprise Cloud data-residency logins on `<tenant>.ghe.com` use only `api.<tenant>.ghe.com`. The allowlist contains that matching API host alone; Enterprise credentials never fall back to public GitHub. Other/custom Enterprise authorities are reported as unsupported without sending a request; Codex resolves its OAuth access token through Pi, which may refresh and persist it. Ordinary API keys are not sent to these subscription endpoints. The Codex account-id header is extracted locally from the access token's account-id claim; no other JWT claims or inference headers are forwarded. Credentials are never printed or persisted by this package, and no `gh` subprocess is involved.
 
 ## Tool
 

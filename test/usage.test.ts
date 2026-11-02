@@ -368,7 +368,9 @@ test("v0.5 the report lists only configured providers, and says so when there ar
   const empty = quotaReport([]);
   assert.ok(empty.includes("No provider"));
   assert.ok(empty.includes("OpenRouter") && empty.includes("DeepSeek"));
-  assert.ok(empty.includes("documented"), "the stance on private APIs is stated, not implied");
+  assert.ok(empty.includes("documented"), "balance endpoints retain their documented contract");
+  assert.ok(empty.includes("published client endpoints") && empty.includes("contracts may change"));
+  assert.ok(empty.includes("OAuth") && empty.includes("opt-in") && empty.includes("no background polling"));
 
   const both = quotaReport([
     { ok: false, provider: "deepseek", reason: "rate limited by the provider" },

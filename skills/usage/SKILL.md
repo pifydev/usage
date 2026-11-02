@@ -17,9 +17,13 @@ This project has the `@pify/usage` extension installed: a live footer
 
 ## Notes
 
-- All numbers are computed locally from pi's session files and the current
-  session's message usage — no network, no tokens spent asking.
-- `/usage` (user command) shows the full dashboard: session breakdown,
-  today/7d/30d history, and per-model totals.
+- Session/history metrics are computed locally from pi's session files and
+  the current session's message usage — no network, no tokens spent asking.
+- `/usage` (or `/pify-usage` when another extension owns `/usage`) shows
+  the full dashboard: session breakdown, today/7d/30d history, and per-model totals.
+- `/usage quota` is explicitly opt-in network access, not part of
+  `usage_status`. It checks only the active provider, including Pi OAuth
+  Copilot (GitHub.com or matching GHE Cloud tenant)/Codex quotas; the active subscription's cached percentage remaining
+  appears in the footer. Do not run quota checks just to report local costs.
 - Costs come from pi's own per-message usage.cost; if a model has no price
   configured, its cost reads as $0 while tokens still count.

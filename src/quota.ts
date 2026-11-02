@@ -5,19 +5,25 @@
  * dashboard: a provider that is slow or down shows as unavailable next to the
  * local numbers.
  *
- * Documented endpoints only. OpenRouter's `/api/v1/key` and DeepSeek's
- * `/user/balance` are both published APIs that report a real balance. The
- * subscription-quota endpoints some plugins use for OpenAI, Anthropic and
- * Gemini are undocumented private APIs reverse-engineered from vendor CLIs;
- * they break without notice and were never offered to third parties, so this
- * package does not call them. (That line is imdlan/pi-usage's, and it is a
- * better reason than the maintenance cost this package cited before.)
+ * OpenRouter and DeepSeek expose balance APIs. Copilot and Codex expose
+ * subscription quotas through endpoints published by their official clients,
+ * without the same versioned REST contract. All four are opt-in per call;
+ * polling is never started by a session, a model change, or a footer redraw.
  */
 
 import { controlledGetJson, type HttpResult } from "./http.ts";
 import { finite, isRecord } from "./types.ts";
 
+export interface QuotaWindow {
+  label: string;
+  remainingPercent: number | null;
+  resetAt: number | null;
+  unlimited: boolean;
+}
+
 export interface QuotaInfo {
+  /** Subscription windows are percentages, not monetary balances. */
+  windows?: QuotaWindow[];
   provider: string;
   /** Spend on this key, in the provider's currency, as it reports it. */
   used: number | null;
@@ -126,6 +132,61 @@ export function parseDeepSeekBalance(payload: unknown): QuotaInfo | null {
   };
 }
 
+/** Copilot premium interactions (or AI credits on token-based billing). */
+export function parseCopilotQuota(payload: unknown): QuotaInfo | null {
+  if (!isRecord(payload) || !isRecord(payload.quota_snapshots)) return null;
+  const snapshot = payload.quota_snapshots.premium_interactions;
+  if (!isRecord(snapshot)) return null;
+  const remaining = num(snapshot.quota_remaining) ?? num(snapshot.remaining);
+  const limit = num(snapshot.entitlement);
+  const percent = num(snapshot.percent_remaining) ??
+    (remaining !== null && limit !== null && limit > 0 ? remaining / limit * 100 : null);
+  const unlimited = snapshot.unlimited === true || (remaining === 0 && limit === 0 && percent === 100);
+  if (percent === null && !unlimited) return null;
+  const reset = payload.quota_reset_date ?? payload.quota_reset_date_utc;
+  const resetAt = typeof reset === "string" ? Date.parse(reset) : Number.NaN;
+  return {
+    ...emptyQuota("github-copilot"),
+    windows: [{
+      label: payload.token_based_billing === true ? "credits" : "premium",
+      remainingPercent: percent === null || unlimited ? null : Math.max(0, Math.min(100, percent)),
+      resetAt: Number.isFinite(resetAt) ? resetAt : null,
+      unlimited,
+    }],
+  };
+}
+
+/** The ChatGPT-authenticated Codex client's primary and secondary windows. */
+export function parseCodexQuota(payload: unknown): QuotaInfo | null {
+  if (!isRecord(payload) || !isRecord(payload.rate_limit)) return null;
+  const windows: QuotaWindow[] = [];
+  for (const [key, fallback] of [["primary_window", "primary"], ["secondary_window", "secondary"]] as const) {
+    const window = payload.rate_limit[key];
+    if (!isRecord(window)) continue;
+    const used = num(window.used_percent);
+    if (used === null || used < 0) continue;
+    const seconds = num(window.limit_window_seconds);
+    const label = seconds !== null && seconds > 0 && seconds % 86400 === 0 ? `${seconds / 86400}d` :
+      seconds !== null && seconds > 0 && seconds % 3600 === 0 ? `${seconds / 3600}h` : fallback;
+    const epoch = num(window.reset_at);
+    const resetAt = epoch === null ? Number.NaN : epoch * 1000;
+    windows.push({ label, remainingPercent: Math.max(0, Math.min(100, 100 - used)),
+      resetAt: Number.isFinite(new Date(resetAt).getTime()) ? resetAt : null, unlimited: false });
+  }
+  return windows.length > 0 ? { ...emptyQuota("openai-codex"), windows } : null;
+}
+
+function codexAccountId(accessToken: string): string | undefined {
+  try {
+    const payload: unknown = JSON.parse(Buffer.from(accessToken.split(".")[1] ?? "", "base64url").toString("utf8"));
+    if (!isRecord(payload) || !isRecord(payload["https://api.openai.com/auth"])) return undefined;
+    const account = payload["https://api.openai.com/auth"].chatgpt_account_id;
+    return typeof account === "string" && account.length > 0 && !/[\r\n]/.test(account) ? account : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface QuotaProvider {
   /** pi's provider id, which is also how the key is looked up. */
   id: string;
@@ -136,6 +197,20 @@ export interface QuotaProvider {
 }
 
 export const QUOTA_PROVIDERS: readonly QuotaProvider[] = [
+  {
+    id: "github-copilot",
+    displayName: "GitHub Copilot",
+    url: "https://api.github.com/copilot_internal/user",
+    allowlist: ["api.github.com"],
+    parse: parseCopilotQuota,
+  },
+  {
+    id: "openai-codex",
+    displayName: "Codex",
+    url: "https://chatgpt.com/backend-api/wham/usage",
+    allowlist: ["chatgpt.com"],
+    parse: parseCodexQuota,
+  },
   {
     id: "openrouter",
     displayName: "OpenRouter",
@@ -168,9 +243,18 @@ export async function fetchQuota(
 ): Promise<QuotaResult> {
   if (!apiKey.trim()) return { ok: false, provider: provider.id, reason: "no API key configured" };
 
+  const headers: Record<string, string> = { Authorization: `Bearer ${apiKey.trim()}`, Accept: "application/json" };
+  if (provider.id === "github-copilot") {
+    headers["X-GitHub-Api-Version"] = "2022-11-28";
+    headers["User-Agent"] = "pify-usage";
+  }
+  if (provider.id === "openai-codex") {
+    const accountId = codexAccountId(apiKey.trim());
+    if (accountId) headers["ChatGPT-Account-Id"] = accountId;
+  }
   const result: HttpResult<unknown> = await controlledGetJson({
     url: provider.url,
-    headers: { Authorization: `Bearer ${apiKey.trim()}`, Accept: "application/json" },
+    headers,
     timeoutMs,
     allowlist: provider.allowlist,
     fetchImpl,
@@ -211,17 +295,41 @@ export function quotaBlock(result: QuotaResult): string {
       `  window   day ${money(q.daily, q.currency)} · week ${money(q.weekly, q.currency)} · month ${money(q.monthly, q.currency)}`,
     );
   }
+  for (const window of q.windows ?? []) {
+    const remaining = windowRemaining(window);
+    lines.push(`  ${window.label}  ${remaining}${window.resetAt === null ? "" : ` · resets ${new Date(window.resetAt).toISOString()}`}`);
+  }
   if (q.freeTier) lines.push("  tier     free");
   return lines.join("\n");
 }
 
-/** What `/usage quota` prints: every provider that has a key, and nothing else. */
+function windowRemaining(window: QuotaWindow): string {
+  return window.unlimited ? "unlimited" : window.remainingPercent === null ? "unknown" : `${Math.round(window.remainingPercent)}% left`;
+}
+
+/** Cached subscription data never masquerades as a live counter. No network here. */
+export function quotaFooter(result: QuotaResult | undefined, fetchedAt: number, now = Date.now()): string {
+  if (!result) return "";
+  const id = result.ok ? result.quota.provider : result.provider;
+  const name = id === "github-copilot" ? "Copilot" : id === "openai-codex" ? "Codex" : null;
+  if (!name) return "";
+  if (!result.ok) return `${name} quota unavailable`;
+  const windows = result.quota.windows;
+  if (!windows?.length) return "";
+  if (now - fetchedAt >= 15 * 60 * 1000 || windows.some(w => w.resetAt !== null && now >= w.resetAt)) {
+    return `${name} quota stale · /pify-usage quota`;
+  }
+  const parts = windows.map(w => `${w.label} ${windowRemaining(w)}`);
+  return `${name} ${parts.join(" · ")} · cached`;
+}
+
+/** What `/usage quota` prints: every provider that has suitable credentials. */
 export function quotaReport(results: QuotaResult[]): string {
   if (results.length === 0) {
     return [
       "No provider with a quota endpoint is configured.",
       `Supported: ${QUOTA_PROVIDERS.map((p) => p.displayName).join(", ")}.`,
-      "Only documented balance endpoints are polled. OpenAI, Anthropic and Gemini publish no balance API, but their rate-limit headers are read passively from ordinary responses — shown above when the session has made a call.",
+      "Balances use documented endpoints and API keys. Copilot and Codex use published client endpoints and require Pi OAuth login; their contracts may change. Quota requests are opt-in, with no background polling. Rate-limit headers are read passively from ordinary responses — shown above when the session has made a call.",
     ].join("\n");
   }
   return results.map(quotaBlock).join("\n\n");

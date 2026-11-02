@@ -10,16 +10,14 @@
  * tmustier's lesson) with a per-file mtime cache. The usage_status tool
  * lets the agent itself check consumption mid-session.
  *
- * Everything above is local: no network, no LLM tokens. The single exception
- * is /usage quota (v0.3), which asks OpenRouter what this key has spent —
- * opt-in per call, 8s timeout, and a failure prints as "unavailable" beside
- * the local numbers. Other providers stay out: @narumitw/pi-usage shows the
- * full set costs ~18k lines of per-provider contract chasing, and OpenRouter
- * is the one that reports a real balance rather than an opaque window.
+ * Everything above is local: no network, no LLM tokens. The exception is
+ * /usage quota: opt-in balance/subscription requests, 8s timeout per provider.
+ * The footer shows cached Copilot/Codex percentages, never background polling.
  */
 import {
   formatSkillsForPrompt,
   getAgentDir,
+  readStoredCredential,
   SettingsManager,
   type ExtensionAPI,
   type ExtensionContext,
@@ -36,7 +34,8 @@ import { buildByDayCsv, buildByModelCsv, buildByProjectCsv, buildTotalsJson } fr
 import { emptyCacheHealth, observeCacheHealth } from "../src/cache-health.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { QUOTA_PROVIDERS, fetchQuota, quotaReport, type QuotaResult } from "../src/quota.ts";
+import { QUOTA_PROVIDERS, fetchQuota, quotaReport, quotaFooter, type QuotaResult } from "../src/quota.ts";
+import { resolveQuotaAuth } from "../src/quota-auth.ts";
 import { redact } from "../src/redact.ts";
 import { scanSessions, persistScanCache, restoreScanCache } from "../src/sessions.ts";
 import { parseRateLimit, formatRateLimit, type RateLimitSnapshot, footerQuotaSegment } from "../src/ratelimit.ts";
@@ -58,6 +57,7 @@ export default function usage(pi: ExtensionAPI) {
    * free from responses the session already made, no extra network call.
    */
   const rateLimits = new Map<string, RateLimitSnapshot>();
+  const quotas = new Map<string, { result: QuotaResult; fetchedAt: number }>();
 
   // after_provider_response carries the status and full headers of every
   // provider call, before the stream is read; gated on hasHandlers, so
@@ -82,15 +82,14 @@ export default function usage(pi: ExtensionAPI) {
   function updateFooter(ctx: UiContext): void {
     if (!ctx.hasUI) return;
     const base = footerText(session, childSpendTotal());
-    if (!base) {
-      ctx.ui.setStatus("usage", undefined);
-      return;
-    }
-    const gauge = contextGauge(contextInfo(ctx).pct);
-    // The subscription wall, from the headers already captured for this
-    // provider: quiet while healthy, a short warning once it is close.
-    const quota = footerQuotaSegment(rateLimits.get((ctx.model as { provider?: string } | null)?.provider ?? ""));
-    ctx.ui.setStatus("usage", [base, gauge, quota].filter(Boolean).join(" · "));
+    const gauge = base ? contextGauge(contextInfo(ctx).pct) : "";
+    const provider = ctx.model?.provider ?? "";
+    const cached = quotas.get(provider);
+    const subscription = quotaFooter(cached?.result, cached?.fetchedAt ?? 0);
+    const passive = footerQuotaSegment(rateLimits.get(provider));
+    // Quota first: compact footers may truncate the rest. Namespace our status
+    // so another usage extension cannot overwrite or clear it.
+    ctx.ui.setStatus("pify-usage", [subscription, base, gauge, passive].filter(Boolean).join(" · ") || undefined);
   }
 
   /**
@@ -158,7 +157,10 @@ export default function usage(pi: ExtensionAPI) {
     updateFooter(ctx);
   });
 
+  pi.on("model_select", async (_event, ctx) => updateFooter(ctx));
+
   pi.on("session_start", async (event, ctx) => {
+    quotas.clear();
     // Rebuild the session totals from the branch so /reload keeps the count.
     session = emptyTotals();
     lastPromptTokens = 0;
@@ -212,36 +214,11 @@ export default function usage(pi: ExtensionAPI) {
     stopChildSpend?.();
     stopChildSpend = null;
     footerCtx = null;
-    if (ctx.hasUI) ctx.ui.setStatus("usage", undefined);
+    quotas.clear();
+    if (ctx.hasUI) ctx.ui.setStatus("pify-usage", undefined);
   });
 
   // ── Command & tool ───────────────────────────────────────────────────
-
-  /**
-   * The key pi itself uses, read from the same auth.json — no second place to
-   * configure credentials, and no key is ever printed.
-   */
-  /**
-   * Ask pi for the key rather than reading auth.json. pi owns credential
-   * storage — env precedence, OAuth, whatever it grows next — and parsing
-   * that file here meant handling secrets this package has no business
-   * touching, with a copy of pi's rules that would quietly go stale.
-   */
-  async function providerKey(ctx: UiContext, provider: string): Promise<string> {
-    const registry = ctx.modelRegistry as unknown as {
-      getApiKeyForProvider?: (id: string) => Promise<string | undefined>;
-      getProviderAuth?: (id: string) => Promise<{ auth?: { apiKey?: string } } | undefined>;
-    };
-    try {
-      const direct = await registry.getApiKeyForProvider?.(provider);
-      if (direct) return direct;
-      const auth = await registry.getProviderAuth?.(provider);
-      if (auth?.auth?.apiKey) return auth.auth.apiKey;
-    } catch {
-      // an unconfigured provider is not an error here
-    }
-    return "";
-  }
 
   /**
    * Where the context window went, computed from what pi already holds:
@@ -323,7 +300,7 @@ export default function usage(pi: ExtensionAPI) {
     return taxLines.length > 0 ? `${formatBreakdown(breakdown, reported)}\n\n${taxLines.join("\n")}` : formatBreakdown(breakdown, reported);
   }
 
-  pi.registerCommand("usage", {
+  const usageCommand: Parameters<ExtensionAPI["registerCommand"]>[1] = {
     description: "Token and cost dashboard: /usage [context | quota | export]",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
@@ -360,39 +337,34 @@ export default function usage(pi: ExtensionAPI) {
         return;
       }
       if ((args ?? "").trim().toLowerCase() === "quota") {
-        // The one networked path in this package, and only when asked for.
-        // Providers with no key are skipped entirely rather than reported as
-        // broken: an unconfigured provider is not a failure.
-        const configured: Array<{ provider: (typeof QUOTA_PROVIDERS)[number]; key: string }> = [];
-        for (const provider of QUOTA_PROVIDERS) {
-          const key = await providerKey(ctx, provider.id);
-          if (key) configured.push({ provider, key });
-        }
-        if (configured.length === 0) {
-          const passive = [...rateLimits.values()]
-            .map((s) => formatRateLimit(s))
-            .filter((line): line is string => line !== null);
-          ctx.ui.notify(
-            passive.length > 0 ? redact(`${passive.join("\n")}\n\n${quotaReport([])}`) : quotaReport([]),
-            "info",
-          );
+        // Only the active provider: a configured balance key does not mean it is in use.
+        const id = ctx.model?.provider ?? "";
+        const provider = QUOTA_PROVIDERS.find(p => p.id === id);
+        const snapshot = rateLimits.get(id);
+        const passive = snapshot ? formatRateLimit(snapshot) : null;
+        if (!provider) {
+          updateFooter(ctx);
+          ctx.ui.notify(redact(passive ?? "No quota endpoint is available for the active provider."), "info");
           return;
         }
-        ctx.ui.notify(`Checking quota for ${configured.map((c) => c.provider.displayName).join(", ")}…`, "info");
-        const results: QuotaResult[] = [];
-        for (const { provider, key } of configured) {
-          results.push(await fetchQuota(provider, key));
+        const auth = await resolveQuotaAuth(provider, ctx.modelRegistry, readStoredCredential);
+        let result: QuotaResult;
+        if (auth.ok) {
+          ctx.ui.notify(`Checking quota for ${provider.displayName}…`, "info");
+          result = await fetchQuota(auth.provider, auth.apiKey);
+        } else {
+          result = auth;
         }
-        const passive = [...rateLimits.values()]
-          .map((s) => formatRateLimit(s))
-          .filter((line): line is string => line !== null);
-        const passiveBlock = passive.length > 0 ? `${passive.join("\n")}\n\n` : "";
-        ctx.ui.notify(redact(passiveBlock + quotaReport(results)), results.every((r) => r.ok) ? "info" : "warning");
+        quotas.set(id, { result, fetchedAt: Date.now() });
+        updateFooter(ctx);
+        ctx.ui.notify(redact((passive ? `${passive}\n\n` : "") + quotaReport([result])), result.ok ? "info" : "warning");
         return;
       }
       ctx.ui.notify(dashboard(ctx), "info");
     },
-  });
+  };
+  pi.registerCommand("usage", usageCommand);
+  pi.registerCommand("pify-usage", usageCommand);
 
   pi.registerCommand("context", {
     description: "Where the context window went: /context",
