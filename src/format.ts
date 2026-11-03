@@ -7,10 +7,21 @@ export function formatTokens(n: number): string {
   return String(Math.round(n));
 }
 
-export function formatCost(n: number): string {
+/**
+ * `estimated` prefixes a `≈` when the figure is (partly) a catalog estimate
+ * rather than a provider-billed total — see `UsageTotals.estimatedCost`. A
+ * zero cost is never marked: there is nothing to be approximate about.
+ */
+export function formatCost(n: number, estimated = false): string {
   if (n === 0) return "$0";
-  if (n < 0.01) return `<$0.01`;
-  return `$${n.toFixed(2)}`;
+  const mark = estimated ? "≈" : "";
+  if (n < 0.01) return `${mark}<$0.01`;
+  return `${mark}$${n.toFixed(2)}`;
+}
+
+/** True when a bucket's cost includes a catalog estimate, so it is not fully exact. */
+export function costEstimated(totals: UsageTotals): boolean {
+  return totals.estimatedCost > 0;
 }
 
 /** Footer text: short, live. Null clears the indicator. */
@@ -27,7 +38,7 @@ function hasChildSpend(children: ChildSpendLike | undefined): children is ChildS
 export function footerText(session: UsageTotals, children?: ChildSpendLike): string | undefined {
   const agents = hasChildSpend(children) ? ` · agents ${formatCost(children.cost)}` : "";
   if (session.messages === 0) return agents ? `📊 0 tok · $0${agents}` : undefined;
-  return `📊 ${formatTokens(session.totalTokens)} tok · ${formatCost(session.cost)}${agents}`;
+  return `📊 ${formatTokens(session.totalTokens)} tok · ${formatCost(session.cost, costEstimated(session))}${agents}`;
 }
 
 const GAUGE_CELLS = 6;
@@ -53,7 +64,7 @@ export function sessionBlock(session: UsageTotals, contextPct: number | null, ch
   const lines = [
     "Session",
     `  tokens   in ${formatTokens(session.input)} · out ${formatTokens(session.output)} · cache ${formatTokens(session.cacheRead)} read / ${formatTokens(session.cacheWrite)} write`,
-    `  cost     ${formatCost(session.cost)} (${session.messages} responses)`,
+    `  cost     ${formatCost(session.cost, costEstimated(session))} (${session.messages} responses)`,
   ];
   if (hasChildSpend(children)) {
     // Child sessions of subagent/swarm/workflow run outside this branch; their
@@ -73,13 +84,17 @@ export function historyBlock(history: HistoryAggregate, now: number): string {
 
   const lines = [
     `History (${history.files} local session files)`,
-    `  today    ${formatCost(today.cost)} · ${formatTokens(today.totalTokens)} tok`,
-    `  7 days   ${formatCost(week.cost)} · ${formatTokens(week.totalTokens)} tok`,
-    `  30 days  ${formatCost(month.cost)} · ${formatTokens(month.totalTokens)} tok`,
+    `  today    ${formatCost(today.cost, costEstimated(today))} · ${formatTokens(today.totalTokens)} tok`,
+    `  7 days   ${formatCost(week.cost, costEstimated(week))} · ${formatTokens(week.totalTokens)} tok`,
+    `  30 days  ${formatCost(month.cost, costEstimated(month))} · ${formatTokens(month.totalTokens)} tok`,
   ];
 
   pushBreakdown(lines, "By model (all time)", history.byModel, 6);
   pushBreakdown(lines, "By project (all time)", history.byProject, 5);
+  // Explain the mark only when it actually appears in this view.
+  if (costEstimated(history.total)) {
+    lines.push("", "≈ estimated from the model catalog; unmarked figures are billed by the provider");
+  }
   return lines.join("\n");
 }
 
@@ -96,6 +111,6 @@ function pushBreakdown(
   const width = rows.reduce((m, [name]) => Math.max(m, Math.min(name.length, 40)), 0);
   for (const [name, t] of rows) {
     const label = name.length > 40 ? `${name.slice(0, 39)}…` : name;
-    lines.push(`  ${label.padEnd(width)}  ${formatCost(t.cost)} · ${formatTokens(t.totalTokens)} tok`);
+    lines.push(`  ${label.padEnd(width)}  ${formatCost(t.cost, costEstimated(t))} · ${formatTokens(t.totalTokens)} tok`);
   }
 }

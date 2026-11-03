@@ -11,7 +11,7 @@ import {
   recordFromLine,
   windowTotals,
 } from "../src/aggregate.ts";
-import { contextGauge, footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
+import { contextGauge, costEstimated, footerText, formatCost, formatTokens, historyBlock, sessionBlock } from "../src/format.ts";
 import { SCAN_CACHE_VERSION, clearScanCache, persistScanCache, projectLabel, restoreScanCache, scanSessions } from "../src/sessions.ts";
 import {
   fetchQuota,
@@ -38,6 +38,7 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
     cacheWrite: 0,
     totalTokens: 6200,
     cost: 0.05,
+    estimated: false,
     ...overrides,
   };
 }
@@ -163,6 +164,35 @@ test("footer hides when empty, shows tokens+cost", () => {
   assert.equal(footerText(emptyTotals()), undefined);
   const totals = addRecord(emptyTotals(), record());
   assert.equal(footerText(totals), "📊 6.2k tok · $0.05");
+});
+
+test("cost is marked ≈ only when it is a catalog estimate", () => {
+  // A record whose cost pi did not get from the provider is an estimate.
+  const est = recordFromEntry(entry({ totalTokens: 100, cost: { total: 0.1 } }));
+  assert.equal(est?.estimated, true);
+  // totalFromProvider:true means the figure was billed — exact.
+  const billed = recordFromEntry(entry({ totalTokens: 100, cost: { total: 0.1, totalFromProvider: true } }));
+  assert.equal(billed?.estimated, false);
+  // A zero cost is never an estimate (nothing to be approximate about).
+  const zero = recordFromEntry(entry({ totalTokens: 100, cost: { total: 0 } }));
+  assert.equal(zero?.estimated, false);
+
+  // estimatedCost accumulates only the estimated part; a mixed bucket is ≈.
+  const mixed = addRecord(addRecord(emptyTotals(), billed!), est!);
+  assert.equal(mixed.cost, 0.2);
+  assert.equal(mixed.estimatedCost, 0.1);
+  assert.equal(costEstimated(mixed), true);
+
+  // A fully-billed bucket is exact, no mark.
+  const exact = addRecord(emptyTotals(), billed!);
+  assert.equal(costEstimated(exact), false);
+
+  // The mark rides the formatted figure.
+  assert.equal(formatCost(0.1, true), "≈$0.10");
+  assert.equal(formatCost(0.1, false), "$0.10");
+  assert.equal(formatCost(0.005, true), "≈<$0.01");
+  assert.equal(formatCost(0, true), "$0");
+  assert.ok((footerText(mixed) ?? "").includes("≈$0.20"));
 });
 
 test("context gauge is a live bar, empty when there is nothing to measure", () => {

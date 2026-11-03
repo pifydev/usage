@@ -10,11 +10,18 @@ export interface UsageTotals {
   cacheWrite: number;
   totalTokens: number;
   cost: number;
+  /**
+   * The part of `cost` that is a catalog estimate rather than a figure the
+   * provider billed (pi's `usage.cost.totalFromProvider === false`). When this
+   * is above zero the bucket's cost is not fully exact, so it is shown with a
+   * `≈`. Zero with a non-zero `cost` means every record was provider-reported.
+   */
+  estimatedCost: number;
   messages: number;
 }
 
 export function emptyTotals(): UsageTotals {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0, messages: 0 };
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0, estimatedCost: 0, messages: 0 };
 }
 
 /** One usage-bearing record extracted from a session file or live event. */
@@ -31,6 +38,8 @@ export interface UsageRecord {
   cacheWrite: number;
   totalTokens: number;
   cost: number;
+  /** True when `cost` is a catalog estimate (pi's `usage.cost.totalFromProvider` is not true). */
+  estimated: boolean;
 }
 
 export interface HistoryAggregate {

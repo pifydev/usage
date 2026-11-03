@@ -15,6 +15,7 @@ export function addRecord(totals: UsageTotals, record: UsageRecord): UsageTotals
   totals.cacheWrite += record.cacheWrite;
   totals.totalTokens += record.totalTokens;
   totals.cost += record.cost;
+  if (record.estimated) totals.estimatedCost += record.cost;
   totals.messages += 1;
   return totals;
 }
@@ -65,6 +66,7 @@ export function windowTotals(byDay: Map<string, UsageTotals>, days: number, now:
     totals.cacheWrite += t.cacheWrite;
     totals.totalTokens += t.totalTokens;
     totals.cost += t.cost;
+    totals.estimatedCost += t.estimatedCost;
     totals.messages += t.messages;
   }
   return totals;
@@ -101,6 +103,10 @@ export function recordFromEntry(entry: unknown): UsageRecord | null {
   const total = finite(usage.totalTokens);
   const cost = isRecord(usage.cost) ? finite(usage.cost.total) : 0;
   if (total === 0 && cost === 0) return null;
+  // pi 1.5.0: cost.total is the provider's billed figure only when
+  // totalFromProvider is true; otherwise it is a catalog estimate (and the
+  // field is absent on older entries, which are all estimates).
+  const estimated = cost > 0 && !(isRecord(usage.cost) && usage.cost.totalFromProvider === true);
 
   const ts =
     typeof entry.timestamp === "string"
@@ -134,6 +140,7 @@ export function recordFromEntry(entry: unknown): UsageRecord | null {
     cacheWrite: finite(usage.cacheWrite),
     totalTokens: total,
     cost,
+    estimated,
   };
 }
 
